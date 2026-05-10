@@ -179,25 +179,25 @@ jobs:
           os.makedirs(HEADER_DIR, exist_ok=True)
 
           SPECIAL_STUBS = {
-              "YTICompactListItemThumbnailSupportedRenderers.h": """\
-#pragma once
-#import <Foundation/Foundation.h>
-#import <YouTubeHeader/YTIIconThumbnailRenderer.h>
-@interface YTICompactListItemThumbnailSupportedRenderers : NSObject
-@property (nonatomic, readonly) BOOL hasIconThumbnailRenderer;
-@property (nonatomic, strong) YTIIconThumbnailRenderer *iconThumbnailRenderer;
-@end
-""",
-              "YTICompactListItemRenderer.h": """\
-#pragma once
-#import <Foundation/Foundation.h>
-#import <YouTubeHeader/YTICompactListItemThumbnailSupportedRenderers.h>
-@interface YTICompactListItemRenderer : NSObject
-@property (nonatomic, readonly) BOOL hasThumbnail;
-@property (nonatomic, strong) YTICompactListItemThumbnailSupportedRenderers *thumbnail;
-@property (nonatomic, strong) id title;
-@end
-""",
+              "YTICompactListItemThumbnailSupportedRenderers.h": (
+                  "#pragma once\n"
+                  "#import <Foundation/Foundation.h>\n"
+                  "#import <YouTubeHeader/YTIIconThumbnailRenderer.h>\n"
+                  "@interface YTICompactListItemThumbnailSupportedRenderers : NSObject\n"
+                  "@property (nonatomic, readonly) BOOL hasIconThumbnailRenderer;\n"
+                  "@property (nonatomic, strong) YTIIconThumbnailRenderer *iconThumbnailRenderer;\n"
+                  "@end\n"
+              ),
+              "YTICompactListItemRenderer.h": (
+                  "#pragma once\n"
+                  "#import <Foundation/Foundation.h>\n"
+                  "#import <YouTubeHeader/YTICompactListItemThumbnailSupportedRenderers.h>\n"
+                  "@interface YTICompactListItemRenderer : NSObject\n"
+                  "@property (nonatomic, readonly) BOOL hasThumbnail;\n"
+                  "@property (nonatomic, strong) YTICompactListItemThumbnailSupportedRenderers *thumbnail;\n"
+                  "@property (nonatomic, strong) id title;\n"
+                  "@end\n"
+              ),
           }
 
           for filename, content in SPECIAL_STUBS.items():
@@ -229,7 +229,7 @@ jobs:
               if os.path.exists(target):
                   continue
               class_name = os.path.splitext(header)[0]
-              stub = f"@class {class_name};\n@interface {class_name} : NSObject\n@end\n"
+              stub = "@class " + class_name + ";\n@interface " + class_name + " : NSObject\n@end\n"
               open(target, "w").write(stub)
               print(f"  STUB: {header}")
               stub_count += 1
