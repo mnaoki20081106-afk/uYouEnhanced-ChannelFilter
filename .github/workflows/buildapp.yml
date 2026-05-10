@@ -46,7 +46,7 @@ on:
         default: true
         required: false
         type: boolean
-  
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -60,29 +60,38 @@ jobs:
 
     steps:
       - name: Checkout Main
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
         with:
           path: main
           ref: ${{ github.event.inputs.commit_id || github.ref }}
-          submodules: recursive
+          # submodules は後のステップで手動初期化するためここでは取得しない
+
+      - name: Initialise submodules
+        # .gitmodules に登録されている Tweaks を明示的に clone する。
+        # zip でフォークしたリポジトリは .git 情報を持たないため
+        # actions/checkout の submodules: recursive では取得できないケースがある。
+        run: |
+          cd main
+          git submodule update --init --recursive
+        continue-on-error: false
 
       - name: Install Dependencies
         run: brew install ldid dpkg make
 
       - name: Set PATH environment variable
-        run: echo "$(brew --prefix make)/libexec/gnubin" >> $GITHUB_PATH 
+        run: echo "$(brew --prefix make)/libexec/gnubin" >> $GITHUB_PATH
 
       - name: Setup Theos
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
         with:
           repository: theos/theos
           ref: master
           path: theos
           submodules: recursive
-      
+
       - name: SDK Caching
         id: SDK
-        uses: actions/cache@v4.3.0
+        uses: actions/cache@v4
         env:
           cache-name: iOS-${{ inputs.sdk_version }}-SDK
         with:
@@ -102,7 +111,7 @@ jobs:
           THEOS: ${{ github.workspace }}/theos
 
       - name: Setup Theos Jailed
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
         with:
           repository: qnblackcat/theos-jailed
           ref: master
@@ -115,67 +124,50 @@ jobs:
         env:
           THEOS: ${{ github.workspace }}/theos
 
-      - name: Hash YT ipa url
-        run: |
-          URL_YT="$(jq -r '.inputs.decrypted_youtube_url' $GITHUB_EVENT_PATH)"
-          echo ::add-mask::$URL_YT
-          echo URL_YT=$URL_YT >> $GITHUB_ENV
-
-      - name: Prepare YouTube iPA
+      - name: Prepare YouTube IPA
         id: prepare_youtube
         run: |
-          wget "$YOUTUBE_URL" --quiet --no-verbose -O main/YouTube.ipa
+          wget "${{ inputs.decrypted_youtube_url }}" --quiet --no-verbose -O main/YouTube.ipa
           cd ${{ github.workspace }}/main
           mv YouTube.ipa YouTube.zip
           unzip -q YouTube.zip
           youtube_version=$(defaults read "$(pwd)/Payload/YouTube.app/Info" CFBundleVersion)
-          echo "==> YouTube v$youtube_version downloaded!"
-          sed -i '' "17s#.*#YOUTUBE_VERSION = ${youtube_version}#g" Makefile
+          echo "==> YouTube v${youtube_version} downloaded"
+          sed -i '' "19s#.*#YOUTUBE_VERSION = ${youtube_version}#g" Makefile
           echo "youtube_version=${youtube_version}" >> $GITHUB_OUTPUT
-
         env:
           THEOS: ${{ github.workspace }}/theos
-          YOUTUBE_URL: ${{ env.URL_YT }}
 
       - name: Fix compiling & Build Package
         id: build_package
         run: |
           cd ${{ github.workspace }}/main
-          sed -i '' "30s#.*#BUNDLE_ID = ${{ env.BUNDLE_ID }}#g" Makefile                          # Modify the bundle ID
-          sed -i '' "29s#.*#DISPLAY_NAME = ${{ env.APP_NAME }}#g" Makefile                        # Modify the app name
-          sed -i '' "1s#.*#export TARGET = iphone:clang:${{ inputs.sdk_version }}:14.0#g" Makefile # Modify the SDK version
+          sed -i '' "1s#.*#export TARGET = iphone:clang:${{ inputs.sdk_version }}:14.0#g" Makefile
+          sed -i '' "29s#.*#DISPLAY_NAME = ${{ inputs.app_name }}#g" Makefile
+          sed -i '' "30s#.*#BUNDLE_ID = ${{ inputs.bundle_id }}#g" Makefile
           make package THEOS_PACKAGE_SCHEME=rootless IPA=Payload/YouTube.app FINALPACKAGE=1
-          echo "package=$(ls -t packages | head -n1)" >>$GITHUB_OUTPUT
+          echo "package=$(ls -t packages | head -n1)" >> $GITHUB_OUTPUT
           echo -e "==> \033[1mSHASUM256: $(shasum -a 256 packages/*.ipa | cut -f1 -d' ')\033[0m"
-          echo -e "==> \033[1mBundle ID: ${{ env.BUNDLE_ID }}\033[0m"
-
+          echo -e "==> \033[1mBundle ID: ${{ inputs.bundle_id }}\033[0m"
         env:
           THEOS: ${{ github.workspace }}/theos
           UYOU_VERSION: ${{ inputs.uyou_version }}
-          BUNDLE_ID: ${{ inputs.bundle_id }}
-          APP_NAME: ${{ inputs.app_name }}
 
       - name: Upload Artifact
         if: ${{ inputs.upload_artifact }}
-        uses: actions/upload-artifact@v5
-        env:
-          UYOU_VERSION: ${{ inputs.uyou_version }}
-          YOUTUBE_VERSION: ${{ steps.prepare_youtube.outputs.youtube_version }}
+        uses: actions/upload-artifact@v4
         with:
-          name: uYouEnhanced_${{ env.YOUTUBE_VERSION }}_${{ env.UYOU_VERSION }}
+          name: uYouEnhanced_${{ steps.prepare_youtube.outputs.youtube_version }}_${{ inputs.uyou_version }}
           path: ${{ github.workspace }}/main/packages/${{ steps.build_package.outputs.package }}
           if-no-files-found: error
 
       - name: Create Release
         if: ${{ inputs.create_release }}
-        id: create_release
-        uses: softprops/action-gh-release@v2.5.0
+        uses: softprops/action-gh-release@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          UYOU_VERSION: ${{ inputs.uyou_version }}
-          YOUTUBE_VERSION: ${{ steps.prepare_youtube.outputs.youtube_version }}
         with:
-          tag_name: v${{ env.YOUTUBE_VERSION }}-${{ env.UYOU_VERSION }}-(${{ github.run_number }})
-          name: v${{ env.YOUTUBE_VERSION }}-${{ env.UYOU_VERSION }}-(${{ github.run_number }})
+          tag_name: v${{ steps.prepare_youtube.outputs.youtube_version }}-${{ inputs.uyou_version }}-(${{ github.run_number }})
+          name: v${{ steps.prepare_youtube.outputs.youtube_version }}-${{ inputs.uyou_version }}-(${{ github.run_number }})
           files: main/packages/*.ipa
           draft: true
