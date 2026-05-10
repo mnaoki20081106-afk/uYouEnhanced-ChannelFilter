@@ -68,17 +68,13 @@ jobs:
       - name: Clone Submodules directly
         # .git が存在しないリポジトリ（zipからpushされたもの）では
         # git submodule update が動かないため .gitmodules をパースして直接 clone する。
-        # 一部リポジトリは非公開化されている可能性があるため fallback URL を定義する。
+        # clone に失敗したサブモジュールは Makefile から自動除外してビルドを継続する。
         run: |
-          python3 << 'PYEOF'
-          import subprocess, os, re, sys
+          python3 - << 'PYEOF'
+          import subprocess, os, re
 
-          # aricloverEXTRA が非公開/削除された場合のフォールバック URL
-          # .gitmodules のURLが落ちた場合のフォールバック
           FALLBACKS = {
-              "Tweaks/YouTimeStamp": [
-                  "https://github.com/PoomSmart/YouTimeStamp.git",
-              ],
+              "Tweaks/YouTimeStamp": ["https://github.com/PoomSmart/YouTimeStamp.git"],
           }
 
           def try_clone(urls, path, branch=None):
@@ -87,45 +83,42 @@ jobs:
                   if branch:
                       cmd += ["--branch", branch]
                   cmd += [url, path]
-                  result = subprocess.run(cmd, capture_output=True, text=True)
-                  if result.returncode == 0:
+                  r = subprocess.run(cmd, capture_output=True, text=True)
+                  if r.returncode == 0:
                       print(f"  OK: {url}")
                       return True
-                  else:
-                      print(f"  FAIL ({url}): {result.stderr.strip()[:120]}")
+                  print(f"  FAIL ({url}): {r.stderr.strip()[:120]}")
               return False
+
+          def remove_from_makefile(tweak_path):
+              name = tweak_path.split("/")[-1]
+              mf = open("main/Makefile").read()
+              mf = re.sub(rf"[ \t]*{re.escape(tweak_path)}\b", "", mf)
+              mf = re.sub(rf"[ \t]*\$\(THEOS_OBJ_DIR\)/{re.escape(name)}\.dylib[ \t]*\\?\n", "\n", mf)
+              open("main/Makefile", "w").write(mf)
+              print(f"  => Removed {tweak_path} from Makefile")
 
           gitmodules = open("main/.gitmodules").read()
           blocks = re.split(r'\[submodule\s+"[^"]+"\]', gitmodules)[1:]
 
-          failed = []
           for block in blocks:
-              path_m   = re.search(r'path\s*=\s*(.+)',   block)
-              url_m    = re.search(r'url\s*=\s*(.+)',    block)
-              branch_m = re.search(r'branch\s*=\s*(.+)', block)
-              if not path_m or not url_m:
+              pm = re.search(r'path\s*=\s*(.+)', block)
+              um = re.search(r'url\s*=\s*(.+)', block)
+              bm = re.search(r'branch\s*=\s*(.+)', block)
+              if not pm or not um:
                   continue
-              path   = path_m.group(1).strip()
-              url    = url_m.group(1).strip()
-              branch = branch_m.group(1).strip() if branch_m else None
-
+              path   = pm.group(1).strip()
+              url    = um.group(1).strip()
+              branch = bm.group(1).strip() if bm else None
               target = os.path.join("main", path)
               if os.path.isdir(target) and os.listdir(target):
                   print(f"Already exists: {path}")
                   continue
-
               os.makedirs(target, exist_ok=True)
               print(f"Cloning {path} ...")
-
-              # まず .gitmodules の URL を試し、失敗したらフォールバックを順に試す
-              urls_to_try = [url] + FALLBACKS.get(path, [])
-              if not try_clone(urls_to_try, target, branch):
-                  print(f"  ERROR: all URLs failed for {path}")
-                  failed.append(path)
-
-          if failed:
-              print(f"\nFailed submodules: {failed}")
-              sys.exit(1)
+              if not try_clone([url] + FALLBACKS.get(path, []), target, branch):
+                  print(f"  WARNING: all URLs failed for {path} - removing from Makefile")
+                  remove_from_makefile(path)
           PYEOF
 
       - name: Install Dependencies
