@@ -359,3 +359,8 @@ static NSString *const kGoogleSigninFix = @"googleSigninFix_enabled";
 
 @interface YTPivotBarIndicatorView : UIView
 @end
+
+@interface YTHeaderLogoControllerImpl : UIViewController
+- (void)setTopbarLogoRenderer:(id)renderer;
+@end
+
