@@ -204,6 +204,8 @@
         }
     }
 }
+
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
     [super traitCollectionDidChange:previousTraitCollection];
     [self.tableView reloadData];
 }
