@@ -64,16 +64,31 @@ jobs:
         with:
           path: main
           ref: ${{ github.event.inputs.commit_id || github.ref }}
-          # submodules は後のステップで手動初期化するためここでは取得しない
 
-      - name: Initialise submodules
-        # .gitmodules に登録されている Tweaks を明示的に clone する。
-        # zip でフォークしたリポジトリは .git 情報を持たないため
-        # actions/checkout の submodules: recursive では取得できないケースがある。
+      - name: Clone Submodules directly
+        # .git が存在しないリポジトリ（zipからpushされたもの）では
+        # git submodule update が動かないため、.gitmodules を読んで直接 clone する
         run: |
           cd main
-          git submodule update --init --recursive
-        continue-on-error: false
+          while IFS= read -r line; do
+            if [[ "$line" =~ ^[[:space:]]*path[[:space:]]*=[[:space:]]*(.+)$ ]]; then
+              current_path="${BASH_REMATCH[1]}"
+            elif [[ "$line" =~ ^[[:space:]]*url[[:space:]]*=[[:space:]]*(.+)$ ]]; then
+              current_url="${BASH_REMATCH[1]}"
+              if [ -n "$current_path" ] && [ -n "$current_url" ]; then
+                if [ ! -d "$current_path" ] || [ -z "$(ls -A "$current_path" 2>/dev/null)" ]; then
+                  echo "Cloning $current_url -> $current_path"
+                  mkdir -p "$current_path"
+                  git clone --quiet --depth=1 --recurse-submodules "$current_url" "$current_path" || \
+                    echo "WARNING: failed to clone $current_url"
+                else
+                  echo "Already exists: $current_path"
+                fi
+                current_path=""
+                current_url=""
+              fi
+            fi
+          done < .gitmodules
 
       - name: Install Dependencies
         run: brew install ldid dpkg make
