@@ -207,15 +207,22 @@ jobs:
           HEADER_DIR = "main/Tweaks/YouTubeHeader"
           os.makedirs(HEADER_DIR, exist_ok=True)
 
-          result = subprocess.run(
-              ["grep", "-rh", "--include=*.h", "--include=*.m",
-               "--include=*.x", "--include=*.xm",
-               "-e", "#import.*YouTubeHeader/",
-               "main/Sources/", "main/Tweaks/"],
-              capture_output=True, text=True
-          )
-          # [^"\n]+ で改行を含まないようにしてマルチラインマッチを防ぐ
-          needed = set(re.findall(r'YouTubeHeader/([^"\n]+\.h)', result.stdout))
+          # grepで動的収集（各ファイルを1行ずつ処理して誤マッチを防ぐ）
+          needed = set()
+          import glob
+          patterns = ["main/Sources/**", "main/Tweaks/**"]
+          exts = {".h", ".m", ".x", ".xm"}
+          for pattern in patterns:
+              for filepath in glob.glob(pattern, recursive=True):
+                  if os.path.splitext(filepath)[1] not in exts:
+                      continue
+                  try:
+                      for line in open(filepath, errors="ignore"):
+                          m = re.search(r'#import\s+<YouTubeHeader/([^>\n]+\.h)>', line)
+                          if m:
+                              needed.add(m.group(1))
+                  except Exception:
+                      pass
 
           stub_count = 0
           skip_count = 0
@@ -243,6 +250,19 @@ jobs:
 
           print(f"==> {stub_count} stub(s) generated, {skip_count} skipped")
           PYEOF
+
+      - name: Debug YouTubeHeader include path
+        run: |
+          echo "=== YTVarispeedSwitchControllerImpl.h の存在確認 ==="
+          find main/Tweaks/YouTubeHeader -name "YTVarispeedSwitchControllerImpl.h" 2>/dev/null             && echo "=> ファイルは存在する（include path問題の可能性）"             || echo "=> ファイルが存在しない（stub生成失敗）"
+
+          echo ""
+          echo "=== YouTubeHeader ディレクトリのヘッダ数 ==="
+          find main/Tweaks/YouTubeHeader -name "*.h" | wc -l
+
+          echo ""
+          echo "=== Makefile の ADDITIONAL_CFLAGS ==="
+          grep "ADDITIONAL_CFLAGS" main/Makefile || echo "(not found)"
 
       - name: Prepare YouTube IPA
         id: prepare_youtube
