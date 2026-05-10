@@ -192,10 +192,19 @@ jobs:
                   "#pragma once\n"
                   "#import <Foundation/Foundation.h>\n"
                   "#import <YouTubeHeader/YTICompactListItemThumbnailSupportedRenderers.h>\n"
+                  "#import <YouTubeHeader/YTIFormattedString.h>\n"
                   "@interface YTICompactListItemRenderer : NSObject\n"
                   "@property (nonatomic, readonly) BOOL hasThumbnail;\n"
                   "@property (nonatomic, strong) YTICompactListItemThumbnailSupportedRenderers *thumbnail;\n"
-                  "@property (nonatomic, strong) id title;\n"
+                  "@property (nonatomic, strong) YTIFormattedString *title;\n"
+                  "@end\n"
+              ),
+              "YTHeaderLogoControllerImpl.h": (
+                  "#pragma once\n"
+                  "#import <UIKit/UIKit.h>\n"
+                  "@class YTITopbarLogoRenderer;\n"
+                  "@interface YTHeaderLogoControllerImpl : UIViewController\n"
+                  "- (void)setTopbarLogoRenderer:(YTITopbarLogoRenderer *)renderer;\n"
                   "@end\n"
               ),
           }
