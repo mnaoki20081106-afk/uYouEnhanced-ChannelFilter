@@ -48,6 +48,60 @@ static void CFShowBlockAlert(NSString *title, NSString *message) {
     [topVC presentViewController:alert animated:YES completion:nil];
 }
 
+// データ（Renderer）の奥深くからチャンネルIDを抽出する関数
+static NSString *CFExtractChannelID(id renderer) {
+    if (!renderer) return nil;
+
+    // ホーム画面などのRichItemRendererだった場合は、中身のVideoRendererを取り出す
+    if ([NSStringFromClass([renderer class]) isEqualToString:@"YTIRichItemRenderer"]) {
+        if ([renderer respondsToSelector:@selector(content)]) {
+            id content = [renderer performSelector:@selector(content)];
+            if ([content respondsToSelector:@selector(videoRenderer)]) {
+                renderer = [content performSelector:@selector(videoRenderer)];
+            }
+        }
+    }
+
+    // 1. 直接 channelId を持っているかチェック
+    if ([renderer respondsToSelector:@selector(channelId)]) {
+        NSString *cid = [renderer performSelector:@selector(channelId)];
+        if ([cid isKindOfClass:[NSString class]] && cid.length > 0) return cid;
+    }
+
+    // 2. テキスト（チャンネル名）のリンク情報に埋め込まれているかチェック
+    NSArray *textSelectors = @[@"ownerText", @"shortBylineText", @"longBylineText"];
+    for (NSString *selName in textSelectors) {
+        SEL sel = NSSelectorFromString(selName);
+        if ([renderer respondsToSelector:sel]) {
+            
+            // ARCのリーク警告を一時的に無視する設定
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            id formattedString = [renderer performSelector:sel];
+#pragma clang diagnostic pop
+
+            if ([formattedString respondsToSelector:@selector(runsArray)]) {
+                NSArray *runs = [formattedString performSelector:@selector(runsArray)];
+                for (id run in runs) {
+                    if ([run respondsToSelector:@selector(navigationEndpoint)]) {
+                        id endpoint = [run performSelector:@selector(navigationEndpoint)];
+                        if ([endpoint respondsToSelector:@selector(browseEndpoint)]) {
+                            id browseEndpoint = [endpoint performSelector:@selector(browseEndpoint)];
+                            if ([browseEndpoint respondsToSelector:@selector(browseId)]) {
+                                NSString *browseId = [browseEndpoint performSelector:@selector(browseId)];
+                                if ([browseId isKindOfClass:[NSString class]] && [browseId hasPrefix:@"UC"]) {
+                                    return browseId;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return nil;
+}
+
 // ─── ① アカウント追加を常にブロック ──────────────────────────────────────────
 
 %hook YTAccountSwitcherController
@@ -113,54 +167,6 @@ static void CFShowBlockAlert(NSString *title, NSString *message) {
 
 // ─── ③-b データ通信レベルのフィルタ（おすすめ・検索結果から完全に除外） ────────────
 
-// データ（Renderer）の奥深くからチャンネルIDを抽出する関数
-static NSString *CFExtractChannelID(id renderer) {
-    if (!renderer) return nil;
-
-    // ホーム画面などのRichItemRendererだった場合は、中身のVideoRendererを取り出す
-    if ([NSStringFromClass([renderer class]) isEqualToString:@"YTIRichItemRenderer"]) {
-        if ([renderer respondsToSelector:@selector(content)]) {
-            id content = [renderer performSelector:@selector(content)];
-            if ([content respondsToSelector:@selector(videoRenderer)]) {
-                renderer = [content performSelector:@selector(videoRenderer)];
-            }
-        }
-    }
-
-    // 1. 直接 channelId を持っているかチェック
-    if ([renderer respondsToSelector:@selector(channelId)]) {
-        NSString *cid = [renderer performSelector:@selector(channelId)];
-        if ([cid isKindOfClass:[NSString class]] && cid.length > 0) return cid;
-    }
-
-    // 2. テキスト（チャンネル名）のリンク情報に埋め込まれているかチェック
-    NSArray *textSelectors = @[@"ownerText", @"shortBylineText", @"longBylineText"];
-    for (NSString *selName in textSelectors) {
-        SEL sel = NSSelectorFromString(selName);
-        if ([renderer respondsToSelector:sel]) {
-            id formattedString = [renderer performSelector:sel];
-            if ([formattedString respondsToSelector:@selector(runsArray)]) {
-                NSArray *runs = [formattedString performSelector:@selector(runsArray)];
-                for (id run in runs) {
-                    if ([run respondsToSelector:@selector(navigationEndpoint)]) {
-                        id endpoint = [run performSelector:@selector(navigationEndpoint)];
-                        if ([endpoint respondsToSelector:@selector(browseEndpoint)]) {
-                            id browseEndpoint = [endpoint performSelector:@selector(browseEndpoint)];
-                            if ([browseEndpoint respondsToSelector:@selector(browseId)]) {
-                                NSString *browseId = [browseEndpoint performSelector:@selector(browseId)];
-                                if ([browseId isKindOfClass:[NSString class]] && [browseId hasPrefix:@"UC"]) {
-                                    return browseId;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    return nil;
-}
-
 // ホーム画面（おすすめフィード）のデータ管理をフック
 %hook YTIRichGridRenderer
 
@@ -168,23 +174,19 @@ static NSString *CFExtractChannelID(id renderer) {
     NSMutableArray *contents = %orig;
     if (!CFShouldFilter()) return contents;
 
-    // 後ろからループして安全に削除する
     for (NSInteger i = contents.count - 1; i >= 0; i--) {
         id item = contents[i];
         NSString *className = NSStringFromClass([item class]);
 
         if ([className isEqualToString:@"YTIRichItemRenderer"]) {
             NSString *channelID = CFExtractChannelID(item);
-            // チャンネルIDが取得できたがホワイトリストにない場合、またはチャンネルIDが判別できない（広告など）場合は削除
             if ((channelID && ![[CFWhitelistManager sharedManager] isChannelAllowed:channelID]) || !channelID) {
-                // ただし、動画ではなく単なるヘッダーやボタンなら消さないためのチェック
                 id content = [item respondsToSelector:@selector(content)] ? [item performSelector:@selector(content)] : nil;
                 if (content && ([content respondsToSelector:@selector(videoRenderer)] || [content respondsToSelector:@selector(shortsLockupViewModel)])) {
                     [contents removeObjectAtIndex:i];
                 }
             }
         }
-        // ショート動画の棚（RichSection）は丸ごと削除
         else if ([className isEqualToString:@"YTIRichSectionRenderer"]) {
             [contents removeObjectAtIndex:i];
         }
@@ -213,7 +215,6 @@ static NSString *CFExtractChannelID(id renderer) {
                 [contents removeObjectAtIndex:i];
             }
         } 
-        // 検索結果に混ざるショート動画（ReelShelf）も丸ごと削除
         else if ([className containsString:@"ReelShelfRenderer"]) {
             [contents removeObjectAtIndex:i];
         }
@@ -297,7 +298,6 @@ static NSString *CFExtractChannelID(id renderer) {
         itemID = [item performSelector:@selector(pivotIdentifier)];
     }
 
-    // FEsearch (検索) は許可し、FEexplore (探索) や FEShorts などだけをブロックする
     if ([itemID isEqualToString:@"FEexplore"] || [itemID isEqualToString:@"FEShorts"]) {
         CFShowBlockAlert(
             @"アクセスできません",
