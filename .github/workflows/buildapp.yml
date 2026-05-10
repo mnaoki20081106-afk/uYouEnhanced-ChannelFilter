@@ -124,6 +124,27 @@ jobs:
           rm -rf ${{ github.workspace }}/main/Tweaks/YouTubeHeader
           git clone --quiet --depth=1 https://github.com/PoomSmart/YouTubeHeader.git ${{ github.workspace }}/main/Tweaks/YouTubeHeader
           ln -sf ${{ github.workspace }}/main/Tweaks/YouTubeHeader $THEOS/include/YouTubeHeader
+
+          cat > ${{ github.workspace }}/main/Tweaks/YouTubeHeader/YTICompactListItemThumbnailSupportedRenderers.h << 'EOF'
+          #pragma once
+          #import <Foundation/Foundation.h>
+          #import "YTIIconThumbnailRenderer.h"
+          @interface YTICompactListItemThumbnailSupportedRenderers : NSObject
+          @property (nonatomic, readonly) BOOL hasIconThumbnailRenderer;
+          @property (nonatomic, strong) YTIIconThumbnailRenderer *iconThumbnailRenderer;
+          @end
+          EOF
+
+          cat > ${{ github.workspace }}/main/Tweaks/YouTubeHeader/YTICompactListItemRenderer.h << 'EOF'
+          #pragma once
+          #import <Foundation/Foundation.h>
+          #import "YTICompactListItemThumbnailSupportedRenderers.h"
+          @interface YTICompactListItemRenderer : NSObject
+          @property (nonatomic, readonly) BOOL hasThumbnail;
+          @property (nonatomic, strong) YTICompactListItemThumbnailSupportedRenderers *thumbnail;
+          @property (nonatomic, strong) id title;
+          @end
+          EOF
         env:
           THEOS: ${{ github.workspace }}/theos
 
