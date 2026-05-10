@@ -66,37 +66,21 @@ jobs:
           ref: ${{ github.event.inputs.commit_id || github.ref }}
 
       - name: Clone Submodules directly
-        # .git が存在しないリポジトリ（zipからpushされたもの）では
-        # git submodule update が動かないため .gitmodules をパースして直接 clone する。
-        # clone に失敗したサブモジュールは Makefile から自動除外してビルドを継続する。
         run: |
           python3 - << 'PYEOF'
-          import subprocess, os, re
+          import subprocess, os, re, sys
 
-          FALLBACKS = {
-              "Tweaks/YouTimeStamp": ["https://github.com/PoomSmart/YouTimeStamp.git"],
-          }
-
-          def try_clone(urls, path, branch=None):
-              for url in urls:
-                  cmd = ["git", "clone", "--quiet", "--depth=1", "--recurse-submodules"]
-                  if branch:
-                      cmd += ["--branch", branch]
-                  cmd += [url, path]
-                  r = subprocess.run(cmd, capture_output=True, text=True)
-                  if r.returncode == 0:
-                      print(f"  OK: {url}")
-                      return True
-                  print(f"  FAIL ({url}): {r.stderr.strip()[:120]}")
+          def try_clone(url, path, branch=None):
+              cmd = ["git", "clone", "--quiet", "--depth=1", "--recurse-submodules"]
+              if branch:
+                  cmd += ["--branch", branch]
+              cmd += [url, path]
+              r = subprocess.run(cmd, capture_output=True, text=True)
+              if r.returncode == 0:
+                  print(f"  OK: {url}")
+                  return True
+              print(f"  FAIL ({url}): {r.stderr.strip()[:120]}")
               return False
-
-          def remove_from_makefile(tweak_path):
-              name = tweak_path.split("/")[-1]
-              mf = open("main/Makefile").read()
-              mf = re.sub(rf"[ \t]*{re.escape(tweak_path)}\b", "", mf)
-              mf = re.sub(rf"[ \t]*\$\(THEOS_OBJ_DIR\)/{re.escape(name)}\.dylib[ \t]*\\?\n", "\n", mf)
-              open("main/Makefile", "w").write(mf)
-              print(f"  => Removed {tweak_path} from Makefile")
 
           gitmodules = open("main/.gitmodules").read()
           blocks = re.split(r'\[submodule\s+"[^"]+"\]', gitmodules)[1:]
@@ -116,9 +100,9 @@ jobs:
                   continue
               os.makedirs(target, exist_ok=True)
               print(f"Cloning {path} ...")
-              if not try_clone([url] + FALLBACKS.get(path, []), target, branch):
-                  print(f"  WARNING: all URLs failed for {path} - removing from Makefile")
-                  remove_from_makefile(path)
+              if not try_clone(url, target, branch):
+                  print(f"  ERROR: Failed to clone {path} from {url}")
+                  sys.exit(1)
           PYEOF
 
       - name: Install Dependencies
@@ -134,6 +118,12 @@ jobs:
           ref: master
           path: theos
           submodules: recursive
+
+      - name: Install YouTubeHeader to Theos
+        run: |
+          git clone --quiet --depth=1 https://github.com/PoomSmart/YouTubeHeader.git $THEOS/include/YouTubeHeader
+        env:
+          THEOS: ${{ github.workspace }}/theos
 
       - name: SDK Caching
         id: SDK
