@@ -57,10 +57,10 @@
 [submodule "Tweaks/YouTube-X"]
     path = Tweaks/YouTube-X
     url = https://github.com/PoomSmart/YouTube-X.git
-[submodule "Tweaks/YouTubeHeader"]
+[submodule "Tweaks/YouTubeHeader"]        ← PoomSmartに変更済み
     path = Tweaks/YouTubeHeader
-    url = https://github.com/aricloverEXTRA/YouTubeHeader.git
-    branch = main
+    url = https://github.com/PoomSmart/YouTubeHeader.git
+    branch = master
 [submodule "Tweaks/YTABConfig"]
     path = Tweaks/YTABConfig
     url = https://github.com/PoomSmart/YTABConfig.git
@@ -68,7 +68,7 @@
 [submodule "Tweaks/YTClassicVideoQuality"]
     path = Tweaks/YTClassicVideoQuality
     url = https://github.com/PoomSmart/YTClassicVideoQuality.git
-[submodule "Tweaks/YTHoldForSpeed"]
+[submodule "Tweaks/YTHoldForSpeed"]       ← aricloverEXTRAのまま（要注意）
     path = Tweaks/YTHoldForSpeed
     url = https://github.com/aricloverEXTRA/YTHoldForSpeed.git
 [submodule "Tweaks/YTIcons"]
@@ -92,8 +92,8 @@
     path = Tweaks/uYouLocalization
     url = https://github.com/dayanch96/uYouLocalization.git
 [submodule "Tweaks/libundirect"]
-	path = Tweaks/libundirect
-	url = https://github.com/opa334/libundirect.git
+    path = Tweaks/libundirect
+    url = https://github.com/opa334/libundirect.git
 [submodule "Tweaks/YTweaks"]
-	path = Tweaks/YTweaks
-	url = https://github.com/fosterbarnes/YTweaks.git
+    path = Tweaks/YTweaks
+    url = https://github.com/fosterbarnes/YTweaks.git
