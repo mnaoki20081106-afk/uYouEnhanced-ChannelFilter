@@ -59,7 +59,7 @@
     url = https://github.com/PoomSmart/YouTube-X.git
 [submodule "Tweaks/YouTubeHeader"]
     path = Tweaks/YouTubeHeader
-    url = https://github.com/PoomSmart/YouTubeHeader.git   ← 修正済み・branch指定なし
+    url = https://github.com/PoomSmart/YouTubeHeader.git
 [submodule "Tweaks/YTABConfig"]
     path = Tweaks/YTABConfig
     url = https://github.com/PoomSmart/YTABConfig.git
@@ -69,7 +69,7 @@
     url = https://github.com/PoomSmart/YTClassicVideoQuality.git
 [submodule "Tweaks/YTHoldForSpeed"]
     path = Tweaks/YTHoldForSpeed
-    url = https://github.com/aricloverEXTRA/YTHoldForSpeed.git   ← 要注意
+    url = https://github.com/PoomSmart/YTHoldForSpeed.git
 [submodule "Tweaks/YTIcons"]
     path = Tweaks/YTIcons
     url = https://github.com/PoomSmart/YTIcons.git
