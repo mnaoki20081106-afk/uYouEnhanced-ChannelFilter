@@ -75,13 +75,11 @@ jobs:
 
           # aricloverEXTRA が非公開/削除された場合のフォールバック URL
           FALLBACKS = {
-              "Tweaks/YouTubeHeader": [
-                  "https://github.com/PoomSmart/YouTubeHeader.git",
-                  "https://github.com/theos-jailed/YouTubeHeader.git",
-              ],
+              # aricloverEXTRA/YTHoldForSpeed が落ちた場合の代替
               "Tweaks/YTHoldForSpeed": [
                   "https://github.com/PoomSmart/YTHoldForSpeed.git",
               ],
+              # aricloverEXTRA/YouTimeStamp が落ちた場合の代替
               "Tweaks/YouTimeStamp": [
                   "https://github.com/PoomSmart/YouTimeStamp.git",
               ],
