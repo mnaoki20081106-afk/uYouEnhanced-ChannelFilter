@@ -121,6 +121,8 @@ jobs:
 
       - name: Install YouTubeHeader to Theos
         run: |
+          rm -rf ${{ github.workspace }}/main/Tweaks/YouTubeHeader
+          git clone --quiet --depth=1 https://github.com/PoomSmart/YouTubeHeader.git ${{ github.workspace }}/main/Tweaks/YouTubeHeader
           ln -sf ${{ github.workspace }}/main/Tweaks/YouTubeHeader $THEOS/include/YouTubeHeader
         env:
           THEOS: ${{ github.workspace }}/theos
