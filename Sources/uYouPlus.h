@@ -364,3 +364,7 @@ static NSString *const kGoogleSigninFix = @"googleSigninFix_enabled";
 - (void)setTopbarLogoRenderer:(id)renderer;
 @end
 
+@interface YTHeaderLogoControllerImpl : UIViewController
+- (void)setTopbarLogoRenderer:(id)renderer;
+- (void)stardy_applyLogoImage;
+@end
