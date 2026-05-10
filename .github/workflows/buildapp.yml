@@ -170,7 +170,7 @@ jobs:
               name = tweak_path.split("/")[-1]
               mf = open("main/Makefile").read()
               mf = re.sub(rf"[ \t]*{re.escape(tweak_path)}\b", "", mf)
-              mf = re.sub(rf"[ \t]*\$\(THEOS_OBJ_DIR\)/{re.escape(name)}\.dylib[ \t]*\\?\n", "\n", mf)
+              mf = re.sub(rf"[ \t]*\$(THEOS_OBJ_DIR)/{re.escape(name)}\.dylib[ \t]*\\?\n", "\n", mf)
               open("main/Makefile", "w").write(mf)
               print(f"  => Removed {tweak_path} from Makefile")
 
@@ -207,22 +207,25 @@ jobs:
           HEADER_DIR = "main/Tweaks/YouTubeHeader"
           os.makedirs(HEADER_DIR, exist_ok=True)
 
-          # grepで動的収集（各ファイルを1行ずつ処理して誤マッチを防ぐ）
           needed = set()
-          import glob
-          patterns = ["main/Sources/**", "main/Tweaks/**"]
-          exts = {".h", ".m", ".x", ".xm"}
-          for pattern in patterns:
-              for filepath in glob.glob(pattern, recursive=True):
-                  if os.path.splitext(filepath)[1] not in exts:
-                      continue
-                  try:
-                      for line in open(filepath, errors="ignore"):
-                          m = re.search(r'#import\s+<YouTubeHeader/([^>\n]+\.h)>', line)
-                          if m:
-                              needed.add(m.group(1))
-                  except Exception:
-                      pass
+          exts = {".h", ".m", ".x", ".xm", ".mm", ".c"}
+
+          # os.walkãä½¿ã£ã¦ããµããã£ã¬ã¯ããªã®å¥¥æ·±ãã¾ã§ç¢ºå®ã«æ¢ç´¢ãã
+          for root_dir in ["main/Sources", "main/Tweaks"]:
+              if not os.path.exists(root_dir):
+                  continue
+              for dirpath, _, filenames in os.walk(root_dir):
+                  for filename in filenames:
+                      if os.path.splitext(filename)[1] not in exts:
+                          continue
+                      filepath = os.path.join(dirpath, filename)
+                      try:
+                          for line in open(filepath, errors="ignore"):
+                              m = re.search(r'#import\s+<YouTubeHeader/([^>\n]+\.h)>', line)
+                              if m:
+                                  needed.add(m.group(1))
+                      except Exception:
+                          pass
 
           stub_count = 0
           skip_count = 0
@@ -238,6 +241,7 @@ jobs:
                   print(f"  SKIP (found elsewhere): {header} -> {found_elsewhere}")
                   skip_count += 1
                   continue
+              
               class_name = os.path.splitext(header)[0]
               stub = (
                   f"@class {class_name};\n"
@@ -248,20 +252,28 @@ jobs:
               print(f"  STUB: {header}")
               stub_count += 1
 
+          # ãè¿½å ãã­ã°ã§ã¨ã©ã¼ã«ãªã£ã¦ãããã¡ã¤ã«ãå¿µã®ããå¼·å¶çæ
+          fallback_file = os.path.join(HEADER_DIR, "YTVarispeedSwitchControllerImpl.h")
+          if not os.path.exists(fallback_file):
+              open(fallback_file, "w").write("@class YTVarispeedSwitchControllerImpl;\n@interface YTVarispeedSwitchControllerImpl : NSObject\n@end\n")
+              print("  STUB (Fallback): YTVarispeedSwitchControllerImpl.h forcedly generated.")
+
           print(f"==> {stub_count} stub(s) generated, {skip_count} skipped")
           PYEOF
 
       - name: Debug YouTubeHeader include path
         run: |
-          echo "=== YTVarispeedSwitchControllerImpl.h の存在確認 ==="
-          find main/Tweaks/YouTubeHeader -name "YTVarispeedSwitchControllerImpl.h" 2>/dev/null             && echo "=> ファイルは存在する（include path問題の可能性）"             || echo "=> ファイルが存在しない（stub生成失敗）"
+          echo "=== YTVarispeedSwitchControllerImpl.h ã®å­å¨ç¢ºèª ==="
+          find main/Tweaks/YouTubeHeader -name "YTVarispeedSwitchControllerImpl.h" 2>/dev/null \
+            && echo "=> ãã¡ã¤ã«ã¯å­å¨ããï¼include pathåé¡ã®å¯è½æ§ï¼" \
+            || echo "=> ãã¡ã¤ã«ãå­å¨ããªãï¼stubçæå¤±æï¼"
 
           echo ""
-          echo "=== YouTubeHeader ディレクトリのヘッダ数 ==="
+          echo "=== YouTubeHeader ãã£ã¬ã¯ããªã®ãããæ° ==="
           find main/Tweaks/YouTubeHeader -name "*.h" | wc -l
 
           echo ""
-          echo "=== Makefile の ADDITIONAL_CFLAGS ==="
+          echo "=== Makefile ã® ADDITIONAL_CFLAGS ==="
           grep "ADDITIONAL_CFLAGS" main/Makefile || echo "(not found)"
 
       - name: Prepare YouTube IPA
@@ -273,7 +285,7 @@ jobs:
           unzip -q YouTube.zip
           youtube_version=$(defaults read "$(pwd)/Payload/YouTube.app/Info" CFBundleVersion)
           echo "==> YouTube v${youtube_version} downloaded"
-          sed -i '' "19s#.*#YOUTUBE_VERSION = ${youtube_version}#g" Makefile
+          sed -i '' "s/^YOUTUBE_VERSION .*/YOUTUBE_VERSION = ${youtube_version}/g" Makefile
           echo "youtube_version=${youtube_version}" >> $GITHUB_OUTPUT
         env:
           THEOS: ${{ github.workspace }}/theos
@@ -282,9 +294,9 @@ jobs:
         id: build_package
         run: |
           cd ${{ github.workspace }}/main
-          sed -i '' "1s#.*#export TARGET = iphone:clang:${{ inputs.sdk_version }}:14.0#g" Makefile
-          sed -i '' "29s#.*#DISPLAY_NAME = ${{ inputs.app_name }}#g" Makefile
-          sed -i '' "30s#.*#BUNDLE_ID = ${{ inputs.bundle_id }}#g" Makefile
+          sed -i '' "s/^export TARGET .*/export TARGET = iphone:clang:${{ inputs.sdk_version }}:14.0/g" Makefile
+          sed -i '' "s/^DISPLAY_NAME .*/DISPLAY_NAME = ${{ inputs.app_name }}/g" Makefile
+          sed -i '' "s/^BUNDLE_ID .*/BUNDLE_ID = ${{ inputs.bundle_id }}/g" Makefile
           make package THEOS_PACKAGE_SCHEME=rootless IPA=Payload/YouTube.app FINALPACKAGE=1
           echo "package=$(ls -t packages | head -n1)" >> $GITHUB_OUTPUT
           echo -e "==> \033[1mSHASUM256: $(shasum -a 256 packages/*.ipa | cut -f1 -d' ')\033[0m"
