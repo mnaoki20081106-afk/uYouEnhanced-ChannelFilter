@@ -117,9 +117,9 @@ jobs:
       - name: Vendor YouTubeHeader
         run: |
           TARGET="main/Tweaks/YouTubeHeader"
-          mkdir -p "$(dirname "$TARGET")"
           rm -rf "$TARGET"
-          git clone --quiet --depth=1 https://github.com/PoomSmart/YouTubeHeader.git "$TARGET"
+          mkdir -p "$TARGET"
+          git clone --quiet --depth=1 https://github.com/aricloverEXTRA/YouTubeHeader.git "$TARGET"
           rm -rf "$TARGET/.git"
           ln -sf ${{ github.workspace }}/$TARGET $THEOS/include/YouTubeHeader
         env:
@@ -178,9 +178,35 @@ jobs:
           HEADER_DIR = "main/Tweaks/YouTubeHeader"
           os.makedirs(HEADER_DIR, exist_ok=True)
 
+          SPECIAL_STUBS = {
+              "YTICompactListItemThumbnailSupportedRenderers.h": """\
+#pragma once
+#import <Foundation/Foundation.h>
+#import <YouTubeHeader/YTIIconThumbnailRenderer.h>
+@interface YTICompactListItemThumbnailSupportedRenderers : NSObject
+@property (nonatomic, readonly) BOOL hasIconThumbnailRenderer;
+@property (nonatomic, strong) YTIIconThumbnailRenderer *iconThumbnailRenderer;
+@end
+""",
+              "YTICompactListItemRenderer.h": """\
+#pragma once
+#import <Foundation/Foundation.h>
+#import <YouTubeHeader/YTICompactListItemThumbnailSupportedRenderers.h>
+@interface YTICompactListItemRenderer : NSObject
+@property (nonatomic, readonly) BOOL hasThumbnail;
+@property (nonatomic, strong) YTICompactListItemThumbnailSupportedRenderers *thumbnail;
+@property (nonatomic, strong) id title;
+@end
+""",
+          }
+
+          for filename, content in SPECIAL_STUBS.items():
+              target = os.path.join(HEADER_DIR, filename)
+              open(target, "w").write(content)
+              print(f"  SPECIAL STUB: {filename}")
+
           needed = set()
           exts = {".h", ".m", ".x", ".xm", ".mm", ".c"}
-
           for root_dir in ["main/Sources", "main/Tweaks"]:
               if not os.path.exists(root_dir):
                   continue
@@ -208,34 +234,7 @@ jobs:
               print(f"  STUB: {header}")
               stub_count += 1
 
-          # 必要なプロパティを持つ特殊なstub
-          special = {
-              "YTICompactListItemThumbnailSupportedRenderers.h": (
-                  "#pragma once\n"
-                  "#import <Foundation/Foundation.h>\n"
-                  "#import <YouTubeHeader/YTIIconThumbnailRenderer.h>\n"
-                  "@interface YTICompactListItemThumbnailSupportedRenderers : NSObject\n"
-                  "@property (nonatomic, readonly) BOOL hasIconThumbnailRenderer;\n"
-                  "@property (nonatomic, strong) YTIIconThumbnailRenderer *iconThumbnailRenderer;\n"
-                  "@end\n"
-              ),
-              "YTICompactListItemRenderer.h": (
-                  "#pragma once\n"
-                  "#import <Foundation/Foundation.h>\n"
-                  "#import <YouTubeHeader/YTICompactListItemThumbnailSupportedRenderers.h>\n"
-                  "@interface YTICompactListItemRenderer : NSObject\n"
-                  "@property (nonatomic, readonly) BOOL hasThumbnail;\n"
-                  "@property (nonatomic, strong) YTICompactListItemThumbnailSupportedRenderers *thumbnail;\n"
-                  "@property (nonatomic, strong) id title;\n"
-                  "@end\n"
-              ),
-          }
-          for filename, content in special.items():
-              target = os.path.join(HEADER_DIR, filename)
-              open(target, "w").write(content)
-              print(f"  SPECIAL STUB: {filename}")
-
-          print(f"==> {stub_count} stub(s) generated")
+          print(f"==> {stub_count} generic stub(s) generated")
           PYEOF
 
       - name: Prepare YouTube IPA
