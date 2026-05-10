@@ -210,7 +210,7 @@ jobs:
           needed = set()
           exts = {".h", ".m", ".x", ".xm", ".mm", ".c"}
 
-          # os.walkãä½¿ã£ã¦ããµããã£ã¬ã¯ããªã®å¥¥æ·±ãã¾ã§ç¢ºå®ã«æ¢ç´¢ãã
+          # os.walkを使って、サブディレクトリの奥深くまで確実に探索する
           for root_dir in ["main/Sources", "main/Tweaks"]:
               if not os.path.exists(root_dir):
                   continue
@@ -252,7 +252,7 @@ jobs:
               print(f"  STUB: {header}")
               stub_count += 1
 
-          # ãè¿½å ãã­ã°ã§ã¨ã©ã¼ã«ãªã£ã¦ãããã¡ã¤ã«ãå¿µã®ããå¼·å¶çæ
+          # ログでエラーになっていたファイルを念のため強制生成
           fallback_file = os.path.join(HEADER_DIR, "YTVarispeedSwitchControllerImpl.h")
           if not os.path.exists(fallback_file):
               open(fallback_file, "w").write("@class YTVarispeedSwitchControllerImpl;\n@interface YTVarispeedSwitchControllerImpl : NSObject\n@end\n")
@@ -263,63 +263,6 @@ jobs:
 
       - name: Debug YouTubeHeader include path
         run: |
-          echo "=== YTVarispeedSwitchControllerImpl.h ã®å­å¨ç¢ºèª ==="
+          echo "=== YTVarispeedSwitchControllerImpl.h の存在確認 ==="
           find main/Tweaks/YouTubeHeader -name "YTVarispeedSwitchControllerImpl.h" 2>/dev/null \
-            && echo "=> ãã¡ã¤ã«ã¯å­å¨ããï¼include pathåé¡ã®å¯è½æ§ï¼" \
-            || echo "=> ãã¡ã¤ã«ãå­å¨ããªãï¼stubçæå¤±æï¼"
-
-          echo ""
-          echo "=== YouTubeHeader ãã£ã¬ã¯ããªã®ãããæ° ==="
-          find main/Tweaks/YouTubeHeader -name "*.h" | wc -l
-
-          echo ""
-          echo "=== Makefile ã® ADDITIONAL_CFLAGS ==="
-          grep "ADDITIONAL_CFLAGS" main/Makefile || echo "(not found)"
-
-      - name: Prepare YouTube IPA
-        id: prepare_youtube
-        run: |
-          wget "${{ inputs.decrypted_youtube_url }}" --quiet --no-verbose -O main/YouTube.ipa
-          cd ${{ github.workspace }}/main
-          mv YouTube.ipa YouTube.zip
-          unzip -q YouTube.zip
-          youtube_version=$(defaults read "$(pwd)/Payload/YouTube.app/Info" CFBundleVersion)
-          echo "==> YouTube v${youtube_version} downloaded"
-          sed -i '' "s/^YOUTUBE_VERSION .*/YOUTUBE_VERSION = ${youtube_version}/g" Makefile
-          echo "youtube_version=${youtube_version}" >> $GITHUB_OUTPUT
-        env:
-          THEOS: ${{ github.workspace }}/theos
-
-      - name: Fix compiling & Build Package
-        id: build_package
-        run: |
-          cd ${{ github.workspace }}/main
-          sed -i '' "s/^export TARGET .*/export TARGET = iphone:clang:${{ inputs.sdk_version }}:14.0/g" Makefile
-          sed -i '' "s/^DISPLAY_NAME .*/DISPLAY_NAME = ${{ inputs.app_name }}/g" Makefile
-          sed -i '' "s/^BUNDLE_ID .*/BUNDLE_ID = ${{ inputs.bundle_id }}/g" Makefile
-          make package THEOS_PACKAGE_SCHEME=rootless IPA=Payload/YouTube.app FINALPACKAGE=1
-          echo "package=$(ls -t packages | head -n1)" >> $GITHUB_OUTPUT
-          echo -e "==> \033[1mSHASUM256: $(shasum -a 256 packages/*.ipa | cut -f1 -d' ')\033[0m"
-          echo -e "==> \033[1mBundle ID: ${{ inputs.bundle_id }}\033[0m"
-        env:
-          THEOS: ${{ github.workspace }}/theos
-          UYOU_VERSION: ${{ inputs.uyou_version }}
-
-      - name: Upload Artifact
-        if: ${{ inputs.upload_artifact }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: uYouEnhanced_${{ steps.prepare_youtube.outputs.youtube_version }}_${{ inputs.uyou_version }}
-          path: ${{ github.workspace }}/main/packages/${{ steps.build_package.outputs.package }}
-          if-no-files-found: error
-
-      - name: Create Release
-        if: ${{ inputs.create_release }}
-        uses: softprops/action-gh-release@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: v${{ steps.prepare_youtube.outputs.youtube_version }}-${{ inputs.uyou_version }}-(${{ github.run_number }})
-          name: v${{ steps.prepare_youtube.outputs.youtube_version }}-${{ inputs.uyou_version }}-(${{ github.run_number }})
-          files: main/packages/*.ipa
-          draft: true
+            && echo "=> ファイルは存在する（include path問題の可能性）" \
