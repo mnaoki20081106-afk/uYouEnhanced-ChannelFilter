@@ -128,7 +128,7 @@ jobs:
           cat > ${{ github.workspace }}/main/Tweaks/YouTubeHeader/YTICompactListItemThumbnailSupportedRenderers.h << 'EOF'
           #pragma once
           #import <Foundation/Foundation.h>
-          #import "YTIIconThumbnailRenderer.h"
+          #import <YouTubeHeader/YTIIconThumbnailRenderer.h>
           @interface YTICompactListItemThumbnailSupportedRenderers : NSObject
           @property (nonatomic, readonly) BOOL hasIconThumbnailRenderer;
           @property (nonatomic, strong) YTIIconThumbnailRenderer *iconThumbnailRenderer;
@@ -138,7 +138,7 @@ jobs:
           cat > ${{ github.workspace }}/main/Tweaks/YouTubeHeader/YTICompactListItemRenderer.h << 'EOF'
           #pragma once
           #import <Foundation/Foundation.h>
-          #import "YTICompactListItemThumbnailSupportedRenderers.h"
+          #import <YouTubeHeader/YTICompactListItemThumbnailSupportedRenderers.h>
           @interface YTICompactListItemRenderer : NSObject
           @property (nonatomic, readonly) BOOL hasThumbnail;
           @property (nonatomic, strong) YTICompactListItemThumbnailSupportedRenderers *thumbnail;
