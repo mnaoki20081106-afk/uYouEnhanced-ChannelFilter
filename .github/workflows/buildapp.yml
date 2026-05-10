@@ -118,61 +118,31 @@ jobs:
         run: |
           TARGET="main/Tweaks/YouTubeHeader"
           mkdir -p "$(dirname "$TARGET")"
-
-          if git clone --quiet --depth=1 https://github.com/aricloverEXTRA/YouTubeHeader.git "$TARGET"; then
-            echo "YouTubeHeader: OK (aricloverEXTRA)"
-            rm -rf "$TARGET/.git"
-          else
-            echo "YouTubeHeader: aricloverEXTRA failed, trying arichornlover mirror..."
-            if git clone --quiet --depth=1 --filter=blob:none --sparse \
-              https://github.com/arichornlover/uYouEnhanced.git /tmp/uyou_upstream; then
-              cd /tmp/uyou_upstream
-              git sparse-checkout set Tweaks/YouTubeHeader
-              git checkout
-              cd -
-              cp -r /tmp/uyou_upstream/Tweaks/YouTubeHeader/. "$TARGET/"
-              rm -rf /tmp/uyou_upstream
-              echo "YouTubeHeader: OK (arichornlover mirror)"
-            else
-              echo "YouTubeHeader: WARNING - all sources failed"
-            fi
-          fi
+          rm -rf "$TARGET"
+          git clone --quiet --depth=1 https://github.com/PoomSmart/YouTubeHeader.git "$TARGET"
+          rm -rf "$TARGET/.git"
+          ln -sf ${{ github.workspace }}/$TARGET $THEOS/include/YouTubeHeader
+        env:
+          THEOS: ${{ github.workspace }}/theos
 
       - name: Clone Submodules directly
         run: |
-          python3 << 'PYEOF'
-          import subprocess, os, re, shutil
+          python3 - << 'PYEOF'
+          import subprocess, os, re, sys
 
           SKIP_PATHS = {"Tweaks/YouTubeHeader"}
 
-          FALLBACKS = {
-              "Tweaks/YouTimeStamp": ["https://github.com/PoomSmart/YouTimeStamp.git"],
-          }
-
-          def try_clone(urls, path, branch=None):
-              for url in urls:
-                  os.makedirs(os.path.dirname(path), exist_ok=True)
-                  cmd = ["git", "clone", "--quiet", "--depth=1", "--recurse-submodules"]
-                  if branch:
-                      cmd += ["--branch", branch]
-                  cmd += [url, path]
-                  r = subprocess.run(cmd, capture_output=True, text=True)
-                  if r.returncode == 0:
-                      print(f"  OK: {url}")
-                      git_dir = os.path.join(path, ".git")
-                      if os.path.exists(git_dir):
-                          shutil.rmtree(git_dir)
-                      return True
-                  print(f"  FAIL ({url}): {r.stderr.strip()[:120]}")
+          def try_clone(url, path, branch=None):
+              cmd = ["git", "clone", "--quiet", "--depth=1", "--recurse-submodules"]
+              if branch:
+                  cmd += ["--branch", branch]
+              cmd += [url, path]
+              r = subprocess.run(cmd, capture_output=True, text=True)
+              if r.returncode == 0:
+                  print(f"  OK: {url}")
+                  return True
+              print(f"  FAIL ({url}): {r.stderr.strip()[:120]}")
               return False
-
-          def remove_from_makefile(tweak_path):
-              name = tweak_path.split("/")[-1]
-              mf = open("main/Makefile").read()
-              mf = re.sub(rf"[ \t]*{re.escape(tweak_path)}\b", "", mf)
-              mf = re.sub(rf"[ \t]*\$(THEOS_OBJ_DIR)/{re.escape(name)}\.dylib[ \t]*\\?\n", "\n", mf)
-              open("main/Makefile", "w").write(mf)
-              print(f"  => Removed {tweak_path} from Makefile")
 
           gitmodules = open("main/.gitmodules").read()
           blocks = re.split(r'\[submodule\s+"[^"]+"\]', gitmodules)[1:]
@@ -193,16 +163,17 @@ jobs:
               if os.path.isdir(target) and os.listdir(target):
                   print(f"Already exists: {path}")
                   continue
+              os.makedirs(target, exist_ok=True)
               print(f"Cloning {path} ...")
-              if not try_clone([url] + FALLBACKS.get(path, []), target, branch):
-                  print(f"  WARNING: all URLs failed for {path} - removing from Makefile")
-                  remove_from_makefile(path)
+              if not try_clone(url, target, branch):
+                  print(f"  ERROR: Failed to clone {path} from {url}")
+                  sys.exit(1)
           PYEOF
 
       - name: Patch missing YouTubeHeader stubs
         run: |
-          python3 << 'PYEOF'
-          import os, subprocess, re
+          python3 - << 'PYEOF'
+          import os, re
 
           HEADER_DIR = "main/Tweaks/YouTubeHeader"
           os.makedirs(HEADER_DIR, exist_ok=True)
@@ -210,7 +181,6 @@ jobs:
           needed = set()
           exts = {".h", ".m", ".x", ".xm", ".mm", ".c"}
 
-          # os.walkを使って、サブディレクトリの奥深くまで確実に探索する
           for root_dir in ["main/Sources", "main/Tweaks"]:
               if not os.path.exists(root_dir):
                   continue
@@ -228,41 +198,90 @@ jobs:
                           pass
 
           stub_count = 0
-          skip_count = 0
           for header in sorted(needed):
               target = os.path.join(HEADER_DIR, header)
               if os.path.exists(target):
                   continue
-              found_elsewhere = subprocess.run(
-                  ["find", "main/Tweaks/", "-name", header, "!", "-path", target],
-                  capture_output=True, text=True
-              ).stdout.strip()
-              if found_elsewhere:
-                  print(f"  SKIP (found elsewhere): {header} -> {found_elsewhere}")
-                  skip_count += 1
-                  continue
-              
               class_name = os.path.splitext(header)[0]
-              stub = (
-                  f"@class {class_name};\n"
-                  f"@interface {class_name} : NSObject\n"
-                  f"@end\n"
-              )
+              stub = f"@class {class_name};\n@interface {class_name} : NSObject\n@end\n"
               open(target, "w").write(stub)
               print(f"  STUB: {header}")
               stub_count += 1
 
-          # ログでエラーになっていたファイルを念のため強制生成
-          fallback_file = os.path.join(HEADER_DIR, "YTVarispeedSwitchControllerImpl.h")
-          if not os.path.exists(fallback_file):
-              open(fallback_file, "w").write("@class YTVarispeedSwitchControllerImpl;\n@interface YTVarispeedSwitchControllerImpl : NSObject\n@end\n")
-              print("  STUB (Fallback): YTVarispeedSwitchControllerImpl.h forcedly generated.")
+          # 必要なプロパティを持つ特殊なstub
+          special = {
+              "YTICompactListItemThumbnailSupportedRenderers.h": (
+                  "#pragma once\n"
+                  "#import <Foundation/Foundation.h>\n"
+                  "#import <YouTubeHeader/YTIIconThumbnailRenderer.h>\n"
+                  "@interface YTICompactListItemThumbnailSupportedRenderers : NSObject\n"
+                  "@property (nonatomic, readonly) BOOL hasIconThumbnailRenderer;\n"
+                  "@property (nonatomic, strong) YTIIconThumbnailRenderer *iconThumbnailRenderer;\n"
+                  "@end\n"
+              ),
+              "YTICompactListItemRenderer.h": (
+                  "#pragma once\n"
+                  "#import <Foundation/Foundation.h>\n"
+                  "#import <YouTubeHeader/YTICompactListItemThumbnailSupportedRenderers.h>\n"
+                  "@interface YTICompactListItemRenderer : NSObject\n"
+                  "@property (nonatomic, readonly) BOOL hasThumbnail;\n"
+                  "@property (nonatomic, strong) YTICompactListItemThumbnailSupportedRenderers *thumbnail;\n"
+                  "@property (nonatomic, strong) id title;\n"
+                  "@end\n"
+              ),
+          }
+          for filename, content in special.items():
+              target = os.path.join(HEADER_DIR, filename)
+              open(target, "w").write(content)
+              print(f"  SPECIAL STUB: {filename}")
 
-          print(f"==> {stub_count} stub(s) generated, {skip_count} skipped")
+          print(f"==> {stub_count} stub(s) generated")
           PYEOF
 
-      - name: Debug YouTubeHeader include path
+      - name: Prepare YouTube IPA
+        id: prepare_youtube
         run: |
-          echo "=== YTVarispeedSwitchControllerImpl.h の存在確認 ==="
-          find main/Tweaks/YouTubeHeader -name "YTVarispeedSwitchControllerImpl.h" 2>/dev/null \
-            && echo "=> ファイルは存在する（include path問題の可能性）" \
+          wget "${{ inputs.decrypted_youtube_url }}" --quiet --no-verbose -O main/YouTube.ipa
+          cd ${{ github.workspace }}/main
+          mv YouTube.ipa YouTube.zip
+          unzip -q YouTube.zip
+          youtube_version=$(defaults read "$(pwd)/Payload/YouTube.app/Info" CFBundleVersion)
+          echo "==> YouTube v${youtube_version} downloaded"
+          sed -i '' "19s#.*#YOUTUBE_VERSION = ${youtube_version}#g" Makefile
+          echo "youtube_version=${youtube_version}" >> $GITHUB_OUTPUT
+        env:
+          THEOS: ${{ github.workspace }}/theos
+
+      - name: Fix compiling & Build Package
+        id: build_package
+        run: |
+          cd ${{ github.workspace }}/main
+          sed -i '' "1s#.*#export TARGET = iphone:clang:${{ inputs.sdk_version }}:14.0#g" Makefile
+          sed -i '' "29s#.*#DISPLAY_NAME = ${{ inputs.app_name }}#g" Makefile
+          sed -i '' "30s#.*#BUNDLE_ID = ${{ inputs.bundle_id }}#g" Makefile
+          make package THEOS_PACKAGE_SCHEME=rootless IPA=Payload/YouTube.app FINALPACKAGE=1
+          echo "package=$(ls -t packages | head -n1)" >> $GITHUB_OUTPUT
+          echo -e "==> \033[1mSHASUM256: $(shasum -a 256 packages/*.ipa | cut -f1 -d' ')\033[0m"
+          echo -e "==> \033[1mBundle ID: ${{ inputs.bundle_id }}\033[0m"
+        env:
+          THEOS: ${{ github.workspace }}/theos
+          UYOU_VERSION: ${{ inputs.uyou_version }}
+
+      - name: Upload Artifact
+        if: ${{ inputs.upload_artifact }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: uYouEnhanced_${{ steps.prepare_youtube.outputs.youtube_version }}_${{ inputs.uyou_version }}
+          path: ${{ github.workspace }}/main/packages/${{ steps.build_package.outputs.package }}
+          if-no-files-found: error
+
+      - name: Create Release
+        if: ${{ inputs.create_release }}
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: v${{ steps.prepare_youtube.outputs.youtube_version }}-${{ inputs.uyou_version }}-(${{ github.run_number }})
+          name: v${{ steps.prepare_youtube.outputs.youtube_version }}-${{ inputs.uyou_version }}-(${{ github.run_number }})
+          files: main/packages/*.ipa
+          draft: true
