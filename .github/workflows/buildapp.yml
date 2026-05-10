@@ -67,28 +67,40 @@ jobs:
 
       - name: Clone Submodules directly
         # .git が存在しないリポジトリ（zipからpushされたもの）では
-        # git submodule update が動かないため、.gitmodules を読んで直接 clone する
+        # git submodule update が動かないため、python で .gitmodules をパースして直接 clone する。
+        # branch 指定があるサブモジュールも正しく処理する。
         run: |
-          cd main
-          while IFS= read -r line; do
-            if [[ "$line" =~ ^[[:space:]]*path[[:space:]]*=[[:space:]]*(.+)$ ]]; then
-              current_path="${BASH_REMATCH[1]}"
-            elif [[ "$line" =~ ^[[:space:]]*url[[:space:]]*=[[:space:]]*(.+)$ ]]; then
-              current_url="${BASH_REMATCH[1]}"
-              if [ -n "$current_path" ] && [ -n "$current_url" ]; then
-                if [ ! -d "$current_path" ] || [ -z "$(ls -A "$current_path" 2>/dev/null)" ]; then
-                  echo "Cloning $current_url -> $current_path"
-                  mkdir -p "$current_path"
-                  git clone --quiet --depth=1 --recurse-submodules "$current_url" "$current_path" || \
-                    echo "WARNING: failed to clone $current_url"
-                else
-                  echo "Already exists: $current_path"
-                fi
-                current_path=""
-                current_url=""
-              fi
-            fi
-          done < .gitmodules
+          python3 << 'PYEOF'
+          import subprocess, os, re
+
+          gitmodules = open("main/.gitmodules").read()
+          blocks = re.split(r'\[submodule\s+"[^"]+"\]', gitmodules)[1:]
+
+          for block in blocks:
+              path  = re.search(r'path\s*=\s*(.+)',   block)
+              url   = re.search(r'url\s*=\s*(.+)',    block)
+              branch = re.search(r'branch\s*=\s*(.+)', block)
+              if not path or not url:
+                  continue
+              path   = path.group(1).strip()
+              url    = url.group(1).strip()
+              branch = branch.group(1).strip() if branch else None
+
+              target = os.path.join("main", path)
+              if os.path.isdir(target) and os.listdir(target):
+                  print(f"Already exists: {path}")
+                  continue
+
+              os.makedirs(target, exist_ok=True)
+              cmd = ["git", "clone", "--quiet", "--depth=1", "--recurse-submodules"]
+              if branch:
+                  cmd += ["--branch", branch]
+              cmd += [url, target]
+              print(f"Cloning {'(' + branch + ') ' if branch else ''}{url} -> {path}")
+              result = subprocess.run(cmd, capture_output=True, text=True)
+              if result.returncode != 0:
+                  print(f"WARNING: {result.stderr.strip()}")
+          PYEOF
 
       - name: Install Dependencies
         run: brew install ldid dpkg make
