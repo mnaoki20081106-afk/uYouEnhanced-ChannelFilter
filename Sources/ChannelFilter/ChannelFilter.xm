@@ -44,7 +44,6 @@ static void CFShowBlockAlert(NSString *title, NSString *message) {
 %hook YTSubscribeButton
 - (void)layoutSubviews {
     %orig;
-    // 前方宣言対策：UIViewとしてキャストしてプロパティにアクセスする
     ((UIView *)self).hidden = YES;
     ((UIView *)self).alpha = 0;
 }
@@ -56,7 +55,6 @@ static void CFShowBlockAlert(NSString *title, NSString *message) {
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        // id型にキャストして respondsToSelector や performSelector のコンパイルエラーを回避
         if ([(id)self respondsToSelector:@selector(cf_syncWhitelist)]) {
             [(id)self performSelector:@selector(cf_syncWhitelist)];
         }
@@ -106,11 +104,10 @@ static void CFShowBlockAlert(NSString *title, NSString *message) {
                     message:@"登録外のチャンネルです。"
                     preferredStyle:UIAlertControllerStyleAlert];
                 [alert addAction:[UIAlertAction actionWithTitle:@"戻る" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-                    // 前方宣言対策：UIViewControllerとしてキャスト
                     UIViewController *vc = (UIViewController *)weakSelf;
                     if (vc.navigationController) [vc.navigationController popViewControllerAnimated:YES];
                     else [vc dismissViewControllerAnimated:YES completion:nil];
-                }]];
+                }]] ;
                 [(UIViewController *)weakSelf presentViewController:alert animated:YES completion:nil];
             }
         }
@@ -118,7 +115,7 @@ static void CFShowBlockAlert(NSString *title, NSString *message) {
 }
 %end
 
-// ─── ④ タブ制限（%origを先に呼び、不整合を防止） ──────────────────────────────
+// ─── ④ タブ制限 ─────────────────────────────────────────────────────────────
 
 %hook YTPivotBarViewController
 - (void)pivotBar:(id)pivotBar didSelectItem:(id)item {
@@ -132,3 +129,8 @@ static void CFShowBlockAlert(NSString *title, NSString *message) {
     }
 }
 %end
+
+// ★これを入れないと上記のすべてのコードが実行されません★
+%ctor {
+    %init;
+}
