@@ -2,18 +2,13 @@
 //  ChannelFilter.xm
 //  uYouEnhanced - ChannelFilter
 //
+//  注意: %ctor は uYouPlus.xm の %init で初期化されるため不要。
+//        %orig の前にブロック処理を行いタブ移動を防ぐ。
+//
 
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
-#import <objc/runtime.h>
-#import "../uYouPlus.h"
 #import "ChannelWhitelist.h"
-
-// ─── ユーティリティ ───────────────────────────────────────────────────────────
-
-static BOOL CFShouldFilter() {
-    return ![[CFWhitelistManager sharedManager] isEmpty];
-}
 
 static void CFShowBlockAlert(NSString *title, NSString *message) {
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -21,116 +16,98 @@ static void CFShowBlockAlert(NSString *title, NSString *message) {
         UIViewController *topVC = window.rootViewController;
         if (!topVC) return;
         while (topVC.presentedViewController) topVC = topVC.presentedViewController;
-        
         UIAlertController *alert = [UIAlertController
             alertControllerWithTitle:title
             message:message
             preferredStyle:UIAlertControllerStyleAlert];
-        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK"
+            style:UIAlertActionStyleDefault handler:nil]];
         [topVC presentViewController:alert animated:YES completion:nil];
     });
 }
 
-// ─── ① アカウント追加をブロック ──────────────────────────────────────────────
-
+// ① アカウント追加をブロック
 %hook YTAccountSwitcherController
 - (void)addAccount {
-    CFShowBlockAlert(@"制限", @"アカウント追加は無効化されています。");
+    CFShowBlockAlert(@"アカウント追加は無効です",
+                     @"このアプリでは複数アカウントへの切り替えはできません。");
+    // %orig を呼ばない
 }
 %end
 
-// ─── ② チャンネル登録ボタンを常に非表示 ──────────────────────────────────────
-
+// ② チャンネル登録ボタンを非表示
 %hook YTSubscribeButton
-- (void)layoutSubviews {
+- (void)didMoveToWindow {
     %orig;
     ((UIView *)self).hidden = YES;
     ((UIView *)self).alpha = 0;
 }
 %end
 
-// ─── ③-a 登録済みチャンネルの同期 ───────────────────────────────────────────
-
+// ③-a 登録チャンネルからホワイトリストを自動同期
 %hook YTSubscriptionsFeedController
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        if ([(id)self respondsToSelector:@selector(cf_syncWhitelist)]) {
-            [(id)self performSelector:@selector(cf_syncWhitelist)];
+    id controller = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (![controller respondsToSelector:@selector(subscriptions)]) return;
+        NSArray *subs = [controller performSelector:@selector(subscriptions)];
+        if (!subs || subs.count == 0) return;
+        NSMutableArray *channelIDs = [NSMutableArray array];
+        for (id renderer in subs) {
+            if ([renderer respondsToSelector:@selector(channelId)]) {
+                NSString *cid = [renderer performSelector:@selector(channelId)];
+                if (cid.length > 0) [channelIDs addObject:cid];
+            }
+        }
+        if (channelIDs.count > 0) {
+            [[CFWhitelistManager sharedManager] syncSubscribedChannelIDs:channelIDs];
         }
     });
 }
-
-%new
-- (void)cf_syncWhitelist {
-    if (![(id)self respondsToSelector:@selector(subscriptions)]) return;
-    
-    NSArray *subs = [(id)self performSelector:@selector(subscriptions)];
-    if (!subs || ![subs isKindOfClass:[NSArray class]]) return;
-
-    NSMutableArray<NSString *> *channelIDs = [NSMutableArray array];
-    for (id renderer in subs) {
-        if ([renderer respondsToSelector:@selector(channelId)]) {
-            NSString *cid = [renderer performSelector:@selector(channelId)];
-            if (cid && cid.length > 0) [channelIDs addObject:cid];
-        }
-    }
-    
-    if (channelIDs.count > 0) {
-        [[CFWhitelistManager sharedManager] syncSubscribedChannelIDs:channelIDs];
-    }
-}
 %end
 
-// ─── ③-b 視聴制限（登録外チャンネルの再生を阻止） ────────────────────────────
-
+// ③-b 動画再生ページのブロック
 %hook YTWatchViewController
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
-    
-    __weak typeof(self) weakSelf = self;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        if (!weakSelf || !CFShouldFilter()) return;
-        
-        NSString *channelID = nil;
-        if ([(id)weakSelf respondsToSelector:@selector(channelId)]) {
-            channelID = [(id)weakSelf performSelector:@selector(channelId)];
-        }
-        
-        if (channelID && channelID.length > 0) {
-            if (![[CFWhitelistManager sharedManager] isChannelAllowed:channelID]) {
-                UIAlertController *alert = [UIAlertController
-                    alertControllerWithTitle:@"制限"
-                    message:@"登録外のチャンネルです。"
-                    preferredStyle:UIAlertControllerStyleAlert];
-                [alert addAction:[UIAlertAction actionWithTitle:@"戻る" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-                    UIViewController *vc = (UIViewController *)weakSelf;
-                    if (vc.navigationController) [vc.navigationController popViewControllerAnimated:YES];
-                    else [vc dismissViewControllerAnimated:YES completion:nil];
-                }]] ;
-                [(UIViewController *)weakSelf presentViewController:alert animated:YES completion:nil];
-            }
-        }
+    if ([[CFWhitelistManager sharedManager] isEmpty]) return;
+    id controller = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)),
+        dispatch_get_main_queue(), ^{
+        if (![controller respondsToSelector:@selector(channelId)]) return;
+        NSString *channelID = [controller performSelector:@selector(channelId)];
+        if (!channelID || channelID.length == 0) return;
+        if ([[CFWhitelistManager sharedManager] isChannelAllowed:channelID]) return;
+        UIViewController *vc = (UIViewController *)controller;
+        UIAlertController *alert = [UIAlertController
+            alertControllerWithTitle:@"視聴できません"
+            message:@"このチャンネルは登録チャンネルではないため視聴できません。"
+            preferredStyle:UIAlertControllerStyleAlert];
+        UINavigationController *nav = vc.navigationController;
+        [alert addAction:[UIAlertAction actionWithTitle:@"戻る"
+            style:UIAlertActionStyleDefault
+            handler:^(UIAlertAction *a) {
+                if (nav) [nav popViewControllerAnimated:YES];
+                else [vc dismissViewControllerAnimated:YES completion:nil];
+            }]];
+        [vc presentViewController:alert animated:YES completion:nil];
     });
 }
 %end
 
-// ─── ④ タブ制限 ─────────────────────────────────────────────────────────────
-
+// ④ 検索・探索タブをブロック（%orig より先にチェック）
 %hook YTPivotBarViewController
 - (void)pivotBar:(id)pivotBar didSelectItem:(id)item {
-    %orig;
-
     if ([item respondsToSelector:@selector(pivotIdentifier)]) {
         NSString *itemID = [item performSelector:@selector(pivotIdentifier)];
-        if ([itemID isEqualToString:@"FEsearch"] || [itemID isEqualToString:@"FEexplore"] || [itemID isEqualToString:@"FEShorts"]) {
-            CFShowBlockAlert(@"アクセス制限", @"登録チャンネルのみ利用可能です。");
+        if ([itemID isEqualToString:@"FEsearch"] ||
+            [itemID isEqualToString:@"FEexplore"]) {
+            CFShowBlockAlert(@"アクセスできません",
+                             @"登録チャンネルタブのみ利用できます。");
+            return; // %orig を呼ばない
         }
     }
+    %orig;
 }
 %end
-
-// ★これを入れないと上記のすべてのコードが実行されません★
-%ctor {
-    %init;
-}
