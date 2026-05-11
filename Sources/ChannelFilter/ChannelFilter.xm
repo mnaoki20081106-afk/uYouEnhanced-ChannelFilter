@@ -203,10 +203,3 @@ static void CFShowBlockAlert(NSString *title, NSString *message) {
 }
 
 %end
-
-// ─── フック登録 ──────────────────────────────────────────────────────────────
-// %constructor はアプリ起動時に自動で呼ばれる。
-// ChannelFilter は常時ONのため条件なしで %init する。
-%ctor {
-    %init;
-}
