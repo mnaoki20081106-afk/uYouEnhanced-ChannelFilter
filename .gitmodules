@@ -59,8 +59,7 @@
     url = https://github.com/PoomSmart/YouTube-X.git
 [submodule "Tweaks/YouTubeHeader"]
     path = Tweaks/YouTubeHeader
-    url = https://github.com/arichornloverALT/YouTubeHeader.git
-    branch = main
+    url = https://github.com/aricloverEXTRA/YouTubeHeader.git
 [submodule "Tweaks/YTABConfig"]
     path = Tweaks/YTABConfig
     url = https://github.com/PoomSmart/YTABConfig.git
@@ -81,10 +80,6 @@
     path = Tweaks/YTVideoOverlay
     url = https://github.com/PoomSmart/YTVideoOverlay.git
     branch = main
-[submodule "Tweaks/iSponsorBlock"]
-    path = Tweaks/iSponsorBlock
-    url = https://github.com/Galactic-Dev/iSponsorBlock.git
-    branch = master
 [submodule "Tweaks/protobuf"]
     path = Tweaks/protobuf
     url = https://github.com/protocolbuffers/protobuf.git
