@@ -27,6 +27,11 @@
 
 @interface YTSubscriptionsFeedController : UIViewController
 - (NSArray *)subscriptions;
+- (void)cf_syncWhitelist;
+@end
+
+@interface YTWatchViewController : UIViewController
+- (void)cf_checkAndBlockIfNeeded;
 @end
 
 // ─── ユーティリティ ───────────────────────────────────────────────────────────
