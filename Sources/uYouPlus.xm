@@ -33,18 +33,32 @@ static NSString *CFExtractChannelID(id renderer) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Premium Logo
-// コンパイルエラー回避のため、メソッドの存在をコンパイラに教える
-@interface YTHeaderLogoController (uYouPlus)
-- (void)setPremiumLogo:(BOOL)premium;
-@end
-
+// ★ STARDY ロゴの置き換え ★
 %hook YTHeaderLogoController
-- (void)setDelegate:(id)delegate {
-    %orig;
-    if (IS_ENABLED(@"isPremiumLogo_enabled")) {
-        [self setPremiumLogo:YES];
-    }
+- (void)setPremiumLogo:(BOOL)isPremium {
+    // まずYouTube公式のPremiumロゴを強制的に表示させる
+    %orig(YES);
+    
+    // 表示された直後に画像をSTARDYロゴに差し替える
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if ([(id)self respondsToSelector:@selector(view)]) {
+            UIView *logoView = [(id)self performSelector:@selector(view)];
+            if (!logoView) return;
+            
+            for (UIView *subview in logoView.subviews) {
+                if ([subview isKindOfClass:[UIImageView class]]) {
+                    UIImageView *imageView = (UIImageView *)subview;
+                    
+                    // BundleからSTARDY.pngを読み込む (拡張子が異なる場合は適宜変更してください)
+                    NSString *imagePath = [[NSBundle mainBundle] pathForResource:@"uYouPlus.bundle/STARDY" ofType:@"png"];
+                    if (imagePath) {
+                        imageView.image = [UIImage imageWithContentsOfFile:imagePath];
+                        imageView.contentMode = UIViewContentModeScaleAspectFit;
+                    }
+                }
+            }
+        }
+    });
 }
 %end
 
@@ -65,7 +79,6 @@ static NSString *CFExtractChannelID(id renderer) {
         NSString *cid = CFExtractChannelID(node);
 
         if (cid && ![[CFWhitelistManager sharedManager] isChannelAllowed:cid]) {
-            // 安全な hidden 操作（前方宣言対策＋BOOL値にオブジェクトを渡さない）
             if ([node isKindOfClass:[UIView class]]) {
                 ((UIView *)node).hidden = YES;
             } else if ([node respondsToSelector:@selector(setHidden:)]) {
