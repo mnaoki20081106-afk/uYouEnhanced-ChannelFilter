@@ -30,7 +30,8 @@
 - (void)cf_syncWhitelist;
 @end
 
-@interface YTWatchViewController : UIViewController
+// YTWatchViewController は YouTubeHeader に定義済みのためカテゴリで拡張
+@interface YTWatchViewController (ChannelFilter)
 - (void)cf_checkAndBlockIfNeeded;
 @end
 
