@@ -34,6 +34,11 @@ static NSString *CFExtractChannelID(id renderer) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Premium Logo
+// コンパイルエラー回避のため、メソッドの存在をコンパイラに教える
+@interface YTHeaderLogoController (uYouPlus)
+- (void)setPremiumLogo:(BOOL)premium;
+@end
+
 %hook YTHeaderLogoController
 - (void)setDelegate:(id)delegate {
     %orig;
