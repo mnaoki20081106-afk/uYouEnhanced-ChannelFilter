@@ -818,6 +818,10 @@ static NSMutableArray <YTIItemSectionRenderer *> *filteredArray(NSArray <YTIItem
         }
     // Use this modified renderer
     %orig;
+    // STARDY: swap the rendered logo image to STARDY branding
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self stardy_applyLogoImage];
+    });
 }
 // For when spoofing before 18.34.5
 - (void)setPremiumLogo:(BOOL)isPremiumLogo {
@@ -827,6 +831,62 @@ static NSMutableArray <YTIItemSectionRenderer *> *filteredArray(NSArray <YTIItem
 - (BOOL)isPremiumLogo {
     return YES;
 }
+
+%new
+- (void)stardy_applyLogoImage {
+    NSBundle *bundle = [NSBundle bundleWithPath:[[NSBundle mainBundle] pathForResource:@"uYouPlus" ofType:@"bundle"]];
+    if (!bundle) return;
+
+    // ダーク/ライトモードはメインウィンドウから判定
+    UIWindow *window = [UIApplication sharedApplication].keyWindow;
+    BOOL isDark = (window.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
+    NSString *imageName = isDark ? @"PremiumLogo_dark" : @"PremiumLogo_lite";
+    NSString *imagePath = [bundle pathForResource:imageName ofType:@"png"];
+    UIImage *stardyLogo = imagePath ? [UIImage imageWithContentsOfFile:imagePath] : nil;
+    if (!stardyLogo) return;
+
+    // YTHeaderLogoControllerImpl が管理するビューを ivar から取得して走査
+    // _logoImageView / _logoView など名前が変わってもUIImageViewを探して差し替える
+    UIView *root = nil;
+    unsigned int count = 0;
+    Ivar *ivars = class_copyIvarList([self class], &count);
+    for (unsigned int i = 0; i < count; i++) {
+        id val = object_getIvar(self, ivars[i]);
+        if ([val isKindOfClass:[UIView class]]) {
+            root = (UIView *)val;
+            break;
+        }
+    }
+    free(ivars);
+
+    // root が取れなければ window 全体から YTHeaderLogoView を探す
+    if (!root) {
+        for (UIView *v in window.subviews) {
+            if (NSStringFromClass([v class]).length > 0 &&
+                [NSStringFromClass([v class]) containsString:@"Logo"]) {
+                root = v;
+                break;
+            }
+        }
+    }
+    if (!root) return;
+
+    // root 以下の全 UIImageView を差し替え
+    NSMutableArray *queue = [NSMutableArray arrayWithObject:root];
+    while (queue.count > 0) {
+        UIView *v = queue.firstObject;
+        [queue removeObjectAtIndex:0];
+        if ([v isKindOfClass:[UIImageView class]]) {
+            UIImageView *iv = (UIImageView *)v;
+            if (iv.image != nil) {
+                iv.image = stardyLogo;
+                iv.contentMode = UIViewContentModeScaleAspectFit;
+            }
+        }
+        [queue addObjectsFromArray:v.subviews];
+    }
+}
+
 %end
 %hook YTAppCollectionViewController
 /**
@@ -913,50 +973,6 @@ static NSMutableArray <YTIItemSectionRenderer *> *filteredArray(NSArray <YTIItem
     %orig;
 }
 %end
-%end
-
-// STARDY: Replace the topbar logo image with STARDY branding
-// This hooks the UIImageView that renders the YouTube / YouTube Premium wordmark logo.
-%hook YTHeaderLogoControllerImpl
-
-- (void)setTopbarLogoRenderer:(YTITopbarLogoRenderer *)renderer {
-    %orig;
-    // After the original sets up the view, swap the image to STARDY logo
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [self stardy_applyLogoImage];
-    });
-}
-
-%new
-- (void)stardy_applyLogoImage {
-    // Walk the view hierarchy to find the logo UIImageView
-    UIView *logoView = nil;
-    if ([self respondsToSelector:@selector(view)]) {
-        logoView = [self performSelector:@selector(view)];
-    }
-    if (!logoView) return;
-
-    // Determine dark/light mode
-    BOOL isDark = (logoView.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
-
-    // Load STARDY logo from bundle
-    NSBundle *bundle = [NSBundle bundleWithPath:[[NSBundle mainBundle] pathForResource:@"uYouPlus" ofType:@"bundle"]];
-    NSString *imageName = isDark ? @"PremiumLogo_dark" : @"PremiumLogo_lite";
-    NSString *imagePath = [bundle pathForResource:imageName ofType:@"png"];
-    UIImage *stardyLogo = imagePath ? [UIImage imageWithContentsOfFile:imagePath] : nil;
-    if (!stardyLogo) return;
-
-    // Replace the first UIImageView found in the logo view
-    for (UIView *subview in logoView.subviews) {
-        if ([subview isKindOfClass:[UIImageView class]]) {
-            UIImageView *iv = (UIImageView *)subview;
-            iv.image = stardyLogo;
-            iv.contentMode = UIViewContentModeScaleAspectFit;
-            break;
-        }
-    }
-}
-
 %end
 
 // Disable animated YouTube Logo - @bhackel
@@ -2047,9 +2063,8 @@ static NSMutableArray <YTIItemSectionRenderer *> *filteredArray(NSArray <YTIItem
     if (IS_ENABLED(kHidePremiumPromos)) {
         %init(gHidePremiumPromos);
     }
-    if (IS_ENABLED(kYouTabFakePremium)) {
-        %init(gFakePremium);
-    }
+    // STARDYロゴ差し替えを含むため常に init する
+    %init(gFakePremium);
     if (IS_ENABLED(kDisablePullToFull)) {
         %init(gDisablePullToFull);
     }
