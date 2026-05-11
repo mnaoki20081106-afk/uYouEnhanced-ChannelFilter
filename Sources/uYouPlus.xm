@@ -1,5 +1,6 @@
 #import "uYouPlus.h"
 #import "uYouPlusPatches.h"
+#import "ChannelFilter/ChannelWhitelist.h"
 
 // Tweak's bundle for Localizations support - @PoomSmart - https://github.com/PoomSmart/YouPiP/commit/aea2473f64c75d73cab713e1e2d5d0a77675024f
 NSBundle *uYouPlusBundle() {
@@ -271,6 +272,22 @@ static void hideButtonsInActionBarIfNeeded(id collectionView) {
 %hook ASCollectionView
 - (id)nodeForItemAtIndexPath:(NSIndexPath *)indexPath {
     id node = %orig;
+    // ChannelFilter: ホワイトリスト外のセルを非表示
+    if (node && ![[CFWhitelistManager sharedManager] isEmpty]) {
+        if ([node respondsToSelector:@selector(renderer)]) {
+            id renderer = [node performSelector:@selector(renderer)];
+            if ([renderer respondsToSelector:@selector(channelId)]) {
+                NSString *channelID = [renderer performSelector:@selector(channelId)];
+                if (channelID.length > 0 &&
+                    ![[CFWhitelistManager sharedManager] isChannelAllowed:channelID]) {
+                    if ([node respondsToSelector:@selector(setHidden:)]) {
+                        [node performSelector:@selector(setHidden:)
+                                   withObject:@YES];
+                    }
+                }
+            }
+        }
+    }
     id weakSelf = (id)self;
     dispatch_async(dispatch_get_main_queue(), ^{
         @try {
