@@ -24,9 +24,6 @@
 [submodule "Tweaks/RemoteLog"]
     path = Tweaks/RemoteLog
     url = https://github.com/Muirey03/RemoteLog.git
-[submodule "Tweaks/Return-YouTube-Dislikes"]
-    path = Tweaks/Return-YouTube-Dislikes
-    url = https://github.com/aricloverEXTRA/Return-YouTube-Dislikes.git
 [submodule "Tweaks/YouGroupSettings"]
     path = Tweaks/YouGroupSettings
     url = https://github.com/PoomSmart/YouGroupSettings.git
