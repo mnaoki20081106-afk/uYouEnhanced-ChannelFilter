@@ -280,9 +280,10 @@ static void hideButtonsInActionBarIfNeeded(id collectionView) {
                 NSString *channelID = [renderer performSelector:@selector(channelId)];
                 if (channelID.length > 0 &&
                     ![[CFWhitelistManager sharedManager] isChannelAllowed:channelID]) {
-                    if ([node respondsToSelector:@selector(setHidden:)]) {
-                        [node performSelector:@selector(setHidden:)
-                                   withObject:@YES];
+                    // UIViewとしてキャストしてsetHidden:を安全に呼ぶ
+                    // performSelector:withObject: はBOOLを渡せないためキャストで対処
+                    if ([node isKindOfClass:[UIView class]]) {
+                        ((UIView *)node).hidden = YES;
                     }
                 }
             }
@@ -836,8 +837,11 @@ static NSMutableArray <YTIItemSectionRenderer *> *filteredArray(NSArray <YTIItem
     // Use this modified renderer
     %orig;
     // STARDY: swap the rendered logo image to STARDY branding
+    __weak typeof(self) weakSelf = self;
     dispatch_async(dispatch_get_main_queue(), ^{
-        [self stardy_applyLogoImage];
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        [strongSelf stardy_applyLogoImage];
     });
 }
 // For when spoofing before 18.34.5
@@ -2080,8 +2084,9 @@ static NSMutableArray <YTIItemSectionRenderer *> *filteredArray(NSArray <YTIItem
     if (IS_ENABLED(kHidePremiumPromos)) {
         %init(gHidePremiumPromos);
     }
-    // STARDYロゴ差し替えを含むため常に init する
-    %init(gFakePremium);
+    if (IS_ENABLED(@"isPremiumLogo_enabled") || IS_ENABLED(@"fakePremium_enabled")) {
+        %init(gFakePremium);
+    }
     if (IS_ENABLED(kDisablePullToFull)) {
         %init(gDisablePullToFull);
     }
