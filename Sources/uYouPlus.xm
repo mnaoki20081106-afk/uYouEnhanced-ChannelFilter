@@ -830,6 +830,48 @@ static NSMutableArray <YTIItemSectionRenderer *> *filteredArray(NSArray <YTIItem
 %end
 %end
 
+// STARDY ロゴ差し替え（gFakePremiumとは独立して常時動作）
+%group gSTARDYLogo
+%hook YTHeaderLogoControllerImpl
+- (void)setTopbarLogoRenderer:(YTITopbarLogoRenderer *)renderer {
+    %orig;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        // バンドルからSTARDYロゴを読み込んで差し替える
+        NSBundle *bundle = [NSBundle bundleWithPath:[[NSBundle mainBundle]
+            pathForResource:@"uYouPlus" ofType:@"bundle"]];
+        if (!bundle) return;
+        UIWindow *window = [UIApplication sharedApplication].keyWindow;
+        if (!window) return;
+        BOOL isDark = (window.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
+        NSString *name = isDark ? @"PremiumLogo_dark" : @"PremiumLogo_lite";
+        NSString *path = [bundle pathForResource:name ofType:@"png"];
+        if (!path) return;
+        UIImage *logo = [UIImage imageWithContentsOfFile:path];
+        if (!logo) return;
+        // ビュー階層を安全に走査してUIImageViewを差し替える
+        NSMutableArray *queue = [NSMutableArray arrayWithArray:window.subviews];
+        while (queue.count > 0) {
+            UIView *v = queue.firstObject;
+            [queue removeObjectAtIndex:0];
+            if ([NSStringFromClass([v class]) containsString:@"Logo"] ||
+                [NSStringFromClass([v class]) containsString:@"Header"]) {
+                for (UIView *sub in v.subviews) {
+                    if ([sub isKindOfClass:[UIImageView class]]) {
+                        UIImageView *iv = (UIImageView *)sub;
+                        if (iv.image) {
+                            iv.image = logo;
+                            iv.contentMode = UIViewContentModeScaleAspectFit;
+                        }
+                    }
+                }
+            }
+            [queue addObjectsFromArray:v.subviews];
+        }
+    });
+}
+%end
+%end
+
 // Fake premium - @bhackel
 %group gFakePremium
 // YouTube Premium Logo - @arichornlover & bhackel
@@ -842,13 +884,6 @@ static NSMutableArray <YTIItemSectionRenderer *> *filteredArray(NSArray <YTIItem
         }
     // Use this modified renderer
     %orig;
-    // STARDY: swap the rendered logo image to STARDY branding
-    __weak typeof(self) weakSelf = self;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        __strong typeof(weakSelf) strongSelf = weakSelf;
-        if (!strongSelf) return;
-        [strongSelf stardy_applyLogoImage];
-    });
 }
 // For when spoofing before 18.34.5
 - (void)setPremiumLogo:(BOOL)isPremiumLogo {
@@ -861,61 +896,6 @@ static NSMutableArray <YTIItemSectionRenderer *> *filteredArray(NSArray <YTIItem
 
 // ダーク/ライトモード切替対応はsetTopbarLogoRenderer:の再呼び出しで対応するため
 // traitCollectionDidChangeフックは不要（クラッシュの原因になるため削除）
-
-%new
-- (void)stardy_applyLogoImage {
-    NSBundle *bundle = [NSBundle bundleWithPath:[[NSBundle mainBundle] pathForResource:@"uYouPlus" ofType:@"bundle"]];
-    if (!bundle) return;
-
-    // ダーク/ライトモードはメインウィンドウから判定
-    UIWindow *window = [UIApplication sharedApplication].keyWindow;
-    BOOL isDark = (window.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
-    NSString *imageName = isDark ? @"PremiumLogo_dark" : @"PremiumLogo_lite";
-    NSString *imagePath = [bundle pathForResource:imageName ofType:@"png"];
-    UIImage *stardyLogo = imagePath ? [UIImage imageWithContentsOfFile:imagePath] : nil;
-    if (!stardyLogo) return;
-
-    // YTHeaderLogoControllerImpl が管理するビューを ivar から取得して走査
-    // _logoImageView / _logoView など名前が変わってもUIImageViewを探して差し替える
-    UIView *root = nil;
-    unsigned int count = 0;
-    Ivar *ivars = class_copyIvarList([self class], &count);
-    for (unsigned int i = 0; i < count; i++) {
-        id val = object_getIvar(self, ivars[i]);
-        if ([val isKindOfClass:[UIView class]]) {
-            root = (UIView *)val;
-            break;
-        }
-    }
-    free(ivars);
-
-    // root が取れなければ window 全体から YTHeaderLogoView を探す
-    if (!root) {
-        for (UIView *v in window.subviews) {
-            if (NSStringFromClass([v class]).length > 0 &&
-                [NSStringFromClass([v class]) containsString:@"Logo"]) {
-                root = v;
-                break;
-            }
-        }
-    }
-    if (!root) return;
-
-    // root 以下の全 UIImageView を差し替え
-    NSMutableArray *queue = [NSMutableArray arrayWithObject:root];
-    while (queue.count > 0) {
-        UIView *v = queue.firstObject;
-        [queue removeObjectAtIndex:0];
-        if ([v isKindOfClass:[UIImageView class]]) {
-            UIImageView *iv = (UIImageView *)v;
-            if (iv.image != nil) {
-                iv.image = stardyLogo;
-                iv.contentMode = UIViewContentModeScaleAspectFit;
-            }
-        }
-        [queue addObjectsFromArray:v.subviews];
-    }
-}
 
 %end
 %hook YTAppCollectionViewController
@@ -2093,8 +2073,11 @@ static NSMutableArray <YTIItemSectionRenderer *> *filteredArray(NSArray <YTIItem
     if (IS_ENABLED(kHidePremiumPromos)) {
         %init(gHidePremiumPromos);
     }
-    // STARDYロゴ差し替えを含むため常に init する
-    %init(gFakePremium);
+    if (IS_ENABLED(kYouTabFakePremium)) {
+        %init(gFakePremium);
+    }
+    // STARDYロゴは設定に関わらず常時適用
+    %init(gSTARDYLogo);
     if (IS_ENABLED(kDisablePullToFull)) {
         %init(gDisablePullToFull);
     }
