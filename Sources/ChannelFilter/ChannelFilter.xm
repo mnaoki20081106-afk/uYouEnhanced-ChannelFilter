@@ -96,13 +96,13 @@ static void CFLog(NSString *format, ...) {
     %orig;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        // 設定画面右上にデバッグボタンを追加
+        UIViewController *vc = (UIViewController *)self;
         UIBarButtonItem *debugBtn = [[UIBarButtonItem alloc]
             initWithTitle:@"CF Debug"
             style:UIBarButtonItemStylePlain
             target:self
             action:@selector(cf_showDebugLog)];
-        self.navigationItem.rightBarButtonItem = debugBtn;
+        vc.navigationItem.rightBarButtonItem = debugBtn;
     });
 }
 %new
@@ -110,7 +110,8 @@ static void CFLog(NSString *format, ...) {
     CFLogViewController *vc = [[CFLogViewController alloc] init];
     UINavigationController *nav = [[UINavigationController alloc]
         initWithRootViewController:vc];
-    [self presentViewController:nav animated:YES completion:nil];
+    UIViewController *self_vc = (UIViewController *)self;
+    [self_vc presentViewController:nav animated:YES completion:nil];
 }
 %end
 
