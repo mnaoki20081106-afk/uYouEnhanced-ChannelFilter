@@ -272,21 +272,27 @@ static void hideButtonsInActionBarIfNeeded(id collectionView) {
 %hook ASCollectionView
 - (id)nodeForItemAtIndexPath:(NSIndexPath *)indexPath {
     id node = %orig;
-    // ChannelFilter: ホワイトリスト外のセルを非表示
+    // ChannelFilter: フィード・検索結果からホワイトリスト外のセルを非表示
+    // ホワイトリストが空（未同期）のときはフィルタしない（詰み防止）
     if (node && ![[CFWhitelistManager sharedManager] isEmpty]) {
+        id renderer = nil;
         if ([node respondsToSelector:@selector(renderer)]) {
-            id renderer = [node performSelector:@selector(renderer)];
-            if ([renderer respondsToSelector:@selector(channelId)]) {
-                NSString *channelID = [renderer performSelector:@selector(channelId)];
-                if (channelID.length > 0 &&
-                    ![[CFWhitelistManager sharedManager] isChannelAllowed:channelID]) {
-                    // UIViewとしてキャストしてsetHidden:を安全に呼ぶ
-                    // performSelector:withObject: はBOOLを渡せないためキャストで対処
-                    if ([node isKindOfClass:[UIView class]]) {
-                        ((UIView *)node).hidden = YES;
-                    }
+            renderer = [node performSelector:@selector(renderer)];
+        }
+        NSString *channelID = nil;
+        if ([renderer respondsToSelector:@selector(channelId)]) {
+            channelID = [renderer performSelector:@selector(channelId)];
+        }
+        if (channelID && channelID.length > 0 &&
+            ![[CFWhitelistManager sharedManager] isChannelAllowed:channelID]) {
+            // メインスレッドでcellを非表示（Textureノードを直接操作しない）
+            dispatch_async(dispatch_get_main_queue(), ^{
+                UICollectionViewCell *cell = [self cellForItemAtIndexPath:indexPath];
+                if (cell) {
+                    cell.hidden = YES;
+                    cell.frame = CGRectZero;
                 }
-            }
+            });
         }
     }
     id weakSelf = (id)self;
@@ -851,6 +857,19 @@ static NSMutableArray <YTIItemSectionRenderer *> *filteredArray(NSArray <YTIItem
 }
 - (BOOL)isPremiumLogo {
     return YES;
+}
+
+// ダーク/ライトモード切替時にロゴを再適用
+- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
+    %orig;
+    if ([self.traitCollection hasDifferentColorAppearanceComparedToTraitCollection:previousTraitCollection]) {
+        __weak typeof(self) weakSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (!strongSelf) return;
+            [strongSelf stardy_applyLogoImage];
+        });
+    }
 }
 
 %new
@@ -2084,9 +2103,8 @@ static NSMutableArray <YTIItemSectionRenderer *> *filteredArray(NSArray <YTIItem
     if (IS_ENABLED(kHidePremiumPromos)) {
         %init(gHidePremiumPromos);
     }
-    if (IS_ENABLED(@"isPremiumLogo_enabled") || IS_ENABLED(@"fakePremium_enabled")) {
-        %init(gFakePremium);
-    }
+    // STARDYロゴ差し替えを含むため常に init する
+    %init(gFakePremium);
     if (IS_ENABLED(kDisablePullToFull)) {
         %init(gDisablePullToFull);
     }
