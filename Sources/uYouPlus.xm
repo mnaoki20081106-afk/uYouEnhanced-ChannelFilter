@@ -859,18 +859,8 @@ static NSMutableArray <YTIItemSectionRenderer *> *filteredArray(NSArray <YTIItem
     return YES;
 }
 
-// ダーク/ライトモード切替時にロゴを再適用
-- (void)traitCollectionDidChange:(UITraitCollection *)previousTraitCollection {
-    %orig;
-    if ([self.traitCollection hasDifferentColorAppearanceComparedToTraitCollection:previousTraitCollection]) {
-        __weak typeof(self) weakSelf = self;
-        dispatch_async(dispatch_get_main_queue(), ^{
-            __strong typeof(weakSelf) strongSelf = weakSelf;
-            if (!strongSelf) return;
-            [strongSelf stardy_applyLogoImage];
-        });
-    }
-}
+// ダーク/ライトモード切替対応はsetTopbarLogoRenderer:の再呼び出しで対応するため
+// traitCollectionDidChangeフックは不要（クラッシュの原因になるため削除）
 
 %new
 - (void)stardy_applyLogoImage {
