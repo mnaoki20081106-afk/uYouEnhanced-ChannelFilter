@@ -1,14 +1,18 @@
 //
-//  ChannelFilter.xm  — デバッグビルド（修正版）
+//  ChannelFilter.xm — デバッグビルド v3
 //
-//  修正点:
-//  1. dispatch_once を削除 → 再描画後もボタンが復活するよう viewWillAppear でチェック＆追加
-//  2. YTSettingsViewController に加え YTAppSettingsViewController / YTSettingsSectionViewController も同時フック
-//  3. dispatch_once に頼らないフローティングボタンを導入
-//     - YTAppDelegate の applicationDidBecomeActive: でウィンドウが切り替わっても再注入
-//     - UIWindow の becomeKeyWindow をフックしてウィンドウ交代を検知する二段構え
-//  4. UIImage フックは「yt_」「logo」「brand」「premium」に絞り、過剰呼び出しを抑制
-//  5. UIViewController フックはクラス名を NSSet で重複ログをまとめる（無限ループ防止）
+//  目的: 以下を確認する
+//    [CF-Logo]  ロゴ画像フックが実際に呼ばれているか / 画像ファイルが見つかるか
+//    [CF-Feed]  フィードフックが呼ばれているか / browseId が何か
+//    [CF-Node]  ASCollectionView.nodeForItemAtIndexPath: が呼ばれているか（既存コード）
+//    [CF-Sync]  ホワイトリスト同期が動いているか
+//
+//  使い方:
+//    1. ビルド・インストール
+//    2. アプリ起動 → CF Logsボタン → ログ確認
+//    3. 登録チャンネルタブを開く → ログ確認
+//    4. 検索タブで何か検索 → ログ確認
+//    5. ホームタブに戻る → ログ確認
 //
 
 #import <UIKit/UIKit.h>
@@ -16,478 +20,356 @@
 #import <objc/runtime.h>
 #import "ChannelWhitelist.h"
 
-// ─── インメモリ + NSUserDefaults ログバッファ ──────────────────────────────────
-static NSMutableArray *CFLogs;
+// ─── ログシステム ─────────────────────────────────────────────────────────────
+static NSMutableArray *_cfLogs;
+
 static void CFLog(NSString *format, ...) {
-    if (!CFLogs) {
-        // アプリ起動直後はまだ NSUserDefaults から復元する
-        NSArray *saved = [[NSUserDefaults standardUserDefaults] arrayForKey:@"cf_debug_logs"];
-        CFLogs = saved ? [saved mutableCopy] : [NSMutableArray array];
-    }
     va_list args;
     va_start(args, format);
     NSString *msg = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
-
     NSLog(@"[CF] %@", msg);
-
-    // メインスレッドでないと NSUserDefaults の同期はスレッドアンセーフ
     dispatch_async(dispatch_get_main_queue(), ^{
-        [CFLogs addObject:msg];
-        if (CFLogs.count > 600) [CFLogs removeObjectAtIndex:0];
-        [[NSUserDefaults standardUserDefaults] setObject:[CFLogs copy] forKey:@"cf_debug_logs"];
+        if (!_cfLogs) {
+            NSArray *saved = [[NSUserDefaults standardUserDefaults] arrayForKey:@"cf_debug_logs"];
+            _cfLogs = saved ? [saved mutableCopy] : [NSMutableArray array];
+        }
+        [_cfLogs addObject:msg];
+        if (_cfLogs.count > 800) [_cfLogs removeObjectAtIndex:0];
+        [[NSUserDefaults standardUserDefaults] setObject:[_cfLogs copy] forKey:@"cf_debug_logs"];
         [[NSUserDefaults standardUserDefaults] synchronize];
     });
 }
 
-// ─── ログビューア ──────────────────────────────────────────────────────────────
+// ─── ログビューア ─────────────────────────────────────────────────────────────
 @interface CFLogViewController : UIViewController <UITableViewDataSource, UITableViewDelegate>
 @property (nonatomic, strong) UITableView *tableView;
 @property (nonatomic, strong) NSArray *logs;
 @end
 
 @implementation CFLogViewController
-
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.title = @"ChannelFilter Debug Log";
+    self.title = @"CF Debug Log";
     self.view.backgroundColor = [UIColor systemBackgroundColor];
 
-    // 右側：閉じる
     UIBarButtonItem *closeBtn = [[UIBarButtonItem alloc]
-        initWithTitle:@"閉じる"
-               style:UIBarButtonItemStylePlain
-              target:self
-              action:@selector(cf_dismiss)];
-
-    // 右側：全コピー
-    UIBarButtonItem *copyAllBtn = [[UIBarButtonItem alloc]
-        initWithTitle:@"全コピー"
-               style:UIBarButtonItemStylePlain
-              target:self
-              action:@selector(cf_copyAll)];
-
-    self.navigationItem.rightBarButtonItems = @[closeBtn, copyAllBtn];
-
-    // 左側：クリア
+        initWithTitle:@"閉じる" style:UIBarButtonItemStylePlain
+               target:self action:@selector(cf_dismiss)];
+    UIBarButtonItem *copyBtn = [[UIBarButtonItem alloc]
+        initWithTitle:@"全コピー" style:UIBarButtonItemStylePlain
+               target:self action:@selector(cf_copyAll)];
+    self.navigationItem.rightBarButtonItems = @[closeBtn, copyBtn];
     self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc]
-        initWithTitle:@"クリア"
-               style:UIBarButtonItemStylePlain
-              target:self
-              action:@selector(cf_clearLogs)];
+        initWithTitle:@"クリア" style:UIBarButtonItemStylePlain
+               target:self action:@selector(cf_clear)];
 
-    self.tableView = [[UITableView alloc] initWithFrame:self.view.bounds
-                                                  style:UITableViewStylePlain];
-    self.tableView.autoresizingMask =
-        UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    self.tableView = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStylePlain];
+    self.tableView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     self.tableView.dataSource = self;
-    self.tableView.delegate   = self;
-    self.tableView.rowHeight  = UITableViewAutomaticDimension;
-    self.tableView.estimatedRowHeight = 44;
+    self.tableView.delegate = self;
+    self.tableView.rowHeight = UITableViewAutomaticDimension;
+    self.tableView.estimatedRowHeight = 40;
     [self.view addSubview:self.tableView];
-
-    [self cf_reloadLogs];
+    [self cf_reload];
 }
-
-- (void)cf_reloadLogs {
+- (void)cf_reload {
     NSArray *saved = [[NSUserDefaults standardUserDefaults] arrayForKey:@"cf_debug_logs"];
-    // 新しいログを上に表示する
     self.logs = saved ? [[saved reverseObjectEnumerator] allObjects] : @[];
     [self.tableView reloadData];
 }
-
 - (void)cf_dismiss { [self dismissViewControllerAnimated:YES completion:nil]; }
-
+- (void)cf_clear {
+    [[NSUserDefaults standardUserDefaults] removeObjectForKey:@"cf_debug_logs"];
+    _cfLogs = [NSMutableArray array];
+    [self cf_reload];
+}
 - (void)cf_copyAll {
-    if (self.logs.count == 0) return;
-    // 古い順（正順）でまとめてコピー
-    NSArray *inOrder = [[self.logs reverseObjectEnumerator] allObjects];
-    NSString *all = [inOrder componentsJoinedByString:@"\n"];
-    [UIPasteboard generalPasteboard].string = all;
-
-    // ボタンを一瞬「✓ コピー済」に変えてフィードバック
+    if (!self.logs.count) return;
+    NSArray *ordered = [[self.logs reverseObjectEnumerator] allObjects];
+    [UIPasteboard generalPasteboard].string = [ordered componentsJoinedByString:@"\n"];
     UIBarButtonItem *btn = self.navigationItem.rightBarButtonItems[1];
-    NSString *original = btn.title;
-    btn.title = @"✓ コピー済";
+    btn.title = @"✓ 済";
     btn.enabled = NO;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        btn.title = original;
-        btn.enabled = YES;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        btn.title = @"全コピー"; btn.enabled = YES;
     });
 }
-
-- (void)cf_clearLogs {
-    [[NSUserDefaults standardUserDefaults] removeObjectForKey:@"cf_debug_logs"];
-    CFLogs = [NSMutableArray array];
-    [self cf_reloadLogs];
-}
-
-- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s {
-    return (NSInteger)self.logs.count;
-}
-- (UITableViewCell *)tableView:(UITableView *)tv
-         cellForRowAtIndexPath:(NSIndexPath *)ip {
-    UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:@"cf_log"];
+- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s { return (NSInteger)self.logs.count; }
+- (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
+    UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:@"c"];
     if (!cell) {
-        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault
-                                      reuseIdentifier:@"cf_log"];
-        cell.textLabel.numberOfLines  = 0;
-        cell.textLabel.font = [UIFont monospacedSystemFontOfSize:11
-                                                          weight:UIFontWeightRegular];
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"c"];
+        cell.textLabel.numberOfLines = 0;
+        cell.textLabel.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
         cell.selectionStyle = UITableViewCellSelectionStyleNone;
     }
     cell.textLabel.text = self.logs[(NSUInteger)ip.row];
     return cell;
 }
-// タップ → クリップボードにコピー
 - (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
     [UIPasteboard generalPasteboard].string = self.logs[(NSUInteger)ip.row];
 }
-
 @end
 
-// ─── フローティングボタンを注入するユーティリティ ─────────────────────────────
-// 同一 window に二重注入しないよう associated object でフラグを立てる
-static const char kCFFloatBtnKey = 0;
-
-static UIButton *cf_makeFloatingButton(void);
-
-static void cf_injectFloatingButton(UIWindow *window) {
-    if (!window) return;
-    // 既に注入済みなら何もしない
-    if (objc_getAssociatedObject(window, &kCFFloatBtnKey)) return;
-
-    UIButton *btn = cf_makeFloatingButton();
-    if (!btn) return;
-    [window addSubview:btn];
-    objc_setAssociatedObject(window, &kCFFloatBtnKey,
-                             btn, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    CFLog(@"[System] Floating button injected into: %@", NSStringFromClass([window class]));
-}
-
-// ─── ログビューアを開く ────────────────────────────────────────────────────────
-// C関数として定義（%hook 外から呼べる）
+// ─── ログビューアを開く ───────────────────────────────────────────────────────
 static void cf_openLogViewer(void) {
     UIWindow *window = nil;
-    // iOS 15+ シーン対応
     if (@available(iOS 15, *)) {
         for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-            if ([scene isKindOfClass:[UIWindowScene class]]) {
-                for (UIWindow *w in ((UIWindowScene *)scene).windows) {
+            if ([scene isKindOfClass:[UIWindowScene class]])
+                for (UIWindow *w in ((UIWindowScene *)scene).windows)
                     if (w.isKeyWindow) { window = w; break; }
-                }
-            }
-            if (window) break;
         }
     }
     if (!window) window = [UIApplication sharedApplication].keyWindow;
-    if (!window) return;
-
     UIViewController *root = window.rootViewController;
-    // モーダルが積まれている場合は一番上のVCを探す
-    while (root.presentedViewController)
-        root = root.presentedViewController;
-
-    CFLogViewController *logVC = [[CFLogViewController alloc] init];
-    UINavigationController *nav =
-        [[UINavigationController alloc] initWithRootViewController:logVC];
-    nav.modalPresentationStyle = UIModalPresentationFormSheet; // iPad 対応
+    while (root.presentedViewController) root = root.presentedViewController;
+    CFLogViewController *vc = [[CFLogViewController alloc] init];
+    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
+    nav.modalPresentationStyle = UIModalPresentationFormSheet;
     [root presentViewController:nav animated:YES completion:nil];
 }
 
-// ─── フローティングボタン本体の生成 ──────────────────────────────────────────
-//
-// ドラッグ可能 / タップでログビューア / iPad でも視認しやすいデザイン
-//
-@interface CFFloatingButton : UIButton
-@end
-@implementation CFFloatingButton
-- (void)handleCFPan:(UIPanGestureRecognizer *)pan {
-    UIView *v = pan.view;
-    CGPoint t = [pan translationInView:v.superview];
-    CGPoint c = v.center;
-    c.x += t.x;
-    c.y += t.y;
-    // 画面外に出ないようにクランプ
-    CGRect bounds = v.superview.bounds;
-    CGFloat hw = v.frame.size.width  / 2;
-    CGFloat hh = v.frame.size.height / 2;
-    c.x = MAX(hw, MIN(bounds.size.width  - hw, c.x));
-    c.y = MAX(hh + 20, MIN(bounds.size.height - hh - 20, c.y)); // ステータスバー回避
-    v.center = c;
-    [pan setTranslation:CGPointZero inView:v.superview];
-}
-@end
+// ─── フローティングボタン ─────────────────────────────────────────────────────
+static const char kCFBtnKey = 0;
 
-static UIButton *cf_makeFloatingButton(void) {
-    CFFloatingButton *btn = [CFFloatingButton buttonWithType:UIButtonTypeSystem];
-    btn.frame = CGRectMake(20, 120, 88, 40);
+static void cf_injectBtn(UIWindow *w) {
+    if (!w || objc_getAssociatedObject(w, &kCFBtnKey)) return;
+    UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
+    btn.frame = CGRectMake(20, 120, 90, 36);
     btn.backgroundColor = [UIColor colorWithWhite:0 alpha:0.75];
     [btn setTitle:@"CF Logs" forState:UIControlStateNormal];
     [btn setTitleColor:[UIColor cyanColor] forState:UIControlStateNormal];
-    btn.titleLabel.font = [UIFont boldSystemFontOfSize:13];
-    btn.layer.cornerRadius = 20;
+    btn.titleLabel.font = [UIFont boldSystemFontOfSize:12];
+    btn.layer.cornerRadius = 18;
     btn.clipsToBounds = YES;
-    btn.layer.borderWidth = 1;
-    btn.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.3].CGColor;
-    // タップ
     [btn addTarget:btn action:@selector(cf_tap) forControlEvents:UIControlEventTouchUpInside];
-    // ドラッグ
-    UIPanGestureRecognizer *pan =
-        [[UIPanGestureRecognizer alloc] initWithTarget:btn
-                                                action:@selector(handleCFPan:)];
+    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:btn action:@selector(cf_pan:)];
     [btn addGestureRecognizer:pan];
-    return btn;
+    [w addSubview:btn];
+    objc_setAssociatedObject(w, &kCFBtnKey, btn, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
-// CFFloatingButton のタップアクション
-%hook CFFloatingButton
+// ─── フローティングボタンのアクション (%hook で追加) ─────────────────────────
+%hook UIButton
 %new
-- (void)cf_tap {
-    cf_openLogViewer();
+- (void)cf_tap { cf_openLogViewer(); }
+%new
+- (void)cf_pan:(UIPanGestureRecognizer *)pan {
+    UIView *v = pan.view;
+    CGPoint t = [pan translationInView:v.superview];
+    CGRect b = v.superview.bounds;
+    CGFloat hw = v.frame.size.width/2, hh = v.frame.size.height/2;
+    CGPoint c = CGPointMake(
+        MAX(hw, MIN(b.size.width - hw, v.center.x + t.x)),
+        MAX(hh + 20, MIN(b.size.height - hh - 20, v.center.y + t.y)));
+    v.center = c;
+    [pan setTranslation:CGPointZero inView:v.superview];
 }
 %end
 
-// ─── フック① YTAppDelegate — アプリがアクティブになるたびに注入試行 ────────────
-//
-// %hook YTAppDelegate が uYouPlus.xm でも使われているため競合しないよう
-// applicationDidBecomeActive: だけを追加でフックする
-//
-%hook YTAppDelegate
-- (void)applicationDidBecomeActive:(UIApplication *)application {
-    %orig;
-    // 少し待ってウィンドウが確定してから注入
-    dispatch_after(
-        dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
-        dispatch_get_main_queue(),
-        ^{
-            UIWindow *target = nil;
-            if (@available(iOS 15, *)) {
-                for (UIScene *scene in application.connectedScenes) {
-                    if ([scene isKindOfClass:[UIWindowScene class]]) {
-                        for (UIWindow *w in ((UIWindowScene *)scene).windows) {
-                            if (w.isKeyWindow) { target = w; break; }
-                        }
-                    }
-                    if (target) break;
-                }
-            }
-            if (!target) target = application.keyWindow;
-            cf_injectFloatingButton(target);
-        });
-}
-%end
-
-// ─── フック② UIWindow.becomeKeyWindow — ウィンドウが切り替わった瞬間に再注入 ──
-//
-// YouTube は動画再生・広告などで UIWindow を頻繁に差し替える。
-// makeKeyAndVisible / becomeKeyWindow をフックしておくと確実に追従できる。
-//
+// ─── UIWindow フック: ウィンドウ切り替えに追従 ───────────────────────────────
 %hook UIWindow
 - (void)becomeKeyWindow {
     %orig;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        cf_injectFloatingButton(self);
+    dispatch_async(dispatch_get_main_queue(), ^{ cf_injectBtn(self); });
+}
+%end
+
+// ─── YTAppDelegate: 起動時に注入 ─────────────────────────────────────────────
+%hook YTAppDelegate
+- (void)applicationDidBecomeActive:(UIApplication *)app {
+    %orig;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        UIWindow *w = nil;
+        if (@available(iOS 15, *)) {
+            for (UIScene *sc in app.connectedScenes)
+                if ([sc isKindOfClass:[UIWindowScene class]])
+                    for (UIWindow *win in ((UIWindowScene *)sc).windows)
+                        if (win.isKeyWindow) { w = win; break; }
+        }
+        if (!w) w = app.keyWindow;
+        cf_injectBtn(w);
+        CFLog(@"[System] App active. WL empty=%d", (int)[[CFWhitelistManager sharedManager] isEmpty]);
     });
 }
 %end
 
-// ─── フック③ 設定画面 — dispatch_once なしで毎回チェック＆追加 ────────────────
-//
-// 問題: dispatch_once は「初回だけ」実行される。YouTubeが設定画面を
-//       再描画するとナビゲーションアイテムごとリセットされるため二度と現れない。
-// 修正: viewWillAppear: でボタンの有無を毎回確認し、消えていたら再追加する。
-//
-// クラス名候補を複数フック（YouTube バージョンによって変わるため）
-
-// ── 共通のボタン追加ロジックをマクロで展開 ──
-#define CF_ADD_DEBUG_BUTTON(vc_self) \
-    do { \
-        UIViewController *_vc = (UIViewController *)(vc_self); \
-        if (_vc.navigationItem.rightBarButtonItem == nil || \
-            _vc.navigationItem.rightBarButtonItem.action != @selector(cf_showDebugLog)) { \
-            UIBarButtonItem *_btn = [[UIBarButtonItem alloc] \
-                initWithTitle:@"CF Debug" \
-                        style:UIBarButtonItemStylePlain \
-                       target:_vc \
-                       action:@selector(cf_showDebugLog)]; \
-            _vc.navigationItem.rightBarButtonItem = _btn; \
-            CFLog(@"[UI] CF Debug button added to %@", NSStringFromClass([_vc class])); \
-        } \
-    } while(0)
-
-%hook YTSettingsViewController
-- (void)viewWillAppear:(BOOL)animated {
+// ─────────────────────────────────────────────────────────────────────────────
+// 調査①: YTInnerTubeCollectionViewController
+//   - loadWithModel: が呼ばれているか
+//   - browseId は何か
+//   - model.contentsArray の件数
+// ─────────────────────────────────────────────────────────────────────────────
+%hook YTInnerTubeCollectionViewController
+- (void)loadWithModel:(id)model {
+    NSString *browseId = [self respondsToSelector:@selector(browseId)]
+        ? [self performSelector:@selector(browseId)] : @"(none)";
+    NSUInteger count = 0;
+    if ([model respondsToSelector:@selector(contentsArray)])
+        count = [[model performSelector:@selector(contentsArray)] count];
+    CFLog(@"[CF-Feed] loadWithModel: browseId=%@ items=%lu class=%@",
+          browseId, (unsigned long)count, NSStringFromClass([self class]));
     %orig;
-    CF_ADD_DEBUG_BUTTON(self);
 }
-%new
-- (void)cf_showDebugLog {
-    cf_openLogViewer();
+
+// displaySections が呼ばれているかも確認
+- (void)displaySectionsWithReloadingSectionControllerByRenderer:(id)renderer {
+    NSMutableArray *secs = [self valueForKey:@"_sectionRenderers"];
+    CFLog(@"[CF-Feed] displaySections: _sectionRenderers count=%lu", (unsigned long)secs.count);
+    %orig;
+}
+
+- (void)addSectionsFromArray:(NSArray *)array {
+    CFLog(@"[CF-Feed] addSectionsFromArray: count=%lu", (unsigned long)array.count);
+    %orig;
 }
 %end
 
-%hook YTAppSettingsViewController
-- (void)viewWillAppear:(BOOL)animated {
-    %orig;
-    CF_ADD_DEBUG_BUTTON(self);
-}
-%new
-- (void)cf_showDebugLog {
-    cf_openLogViewer();
+// ─────────────────────────────────────────────────────────────────────────────
+// 調査②: ASCollectionView.nodeForItemAtIndexPath:
+//   - 呼ばれているか / renderer に channelId があるか
+//   ※ 既存フックが uYouPlus.xm にあるが、そちらは %hook で追加なので
+//     ここでも同じクラスを %hook できる（Logosは同クラスの複数フックを許容）
+// ─────────────────────────────────────────────────────────────────────────────
+%hook ASCollectionView
+- (id)nodeForItemAtIndexPath:(NSIndexPath *)ip {
+    id node = %orig;
+    static NSUInteger callCount = 0;
+    callCount++;
+    // 最初の5回だけ詳細ログ、以降は10件に1回サマリ
+    if (callCount <= 5 || callCount % 50 == 0) {
+        id renderer = [node respondsToSelector:@selector(renderer)]
+            ? [node performSelector:@selector(renderer)] : nil;
+        NSString *cid = ([renderer respondsToSelector:@selector(channelId)])
+            ? [renderer performSelector:@selector(channelId)] : nil;
+        CFLog(@"[CF-Node] #%lu nodeForItem ip=%ld/%ld rendererClass=%@ channelId=%@",
+              (unsigned long)callCount,
+              (long)ip.section, (long)ip.row,
+              NSStringFromClass([renderer class]),
+              cid ?: @"(nil)");
+    }
+    return node;
 }
 %end
 
-// YouTube 20.x で確認されているもう一つの候補
-%hook YTSettingsSectionViewController
-- (void)viewWillAppear:(BOOL)animated {
-    %orig;
-    CF_ADD_DEBUG_BUTTON(self);
-}
-%new
-- (void)cf_showDebugLog {
-    cf_openLogViewer();
-}
-%end
-
-// ─── 調査①: タブ・ナビゲーション系のクラス名 ────────────────────────────────
-// 重複ログを抑制するため NSMutableSet でキャッシュする
-%hook UIViewController
-- (void)viewDidAppear:(BOOL)animated {
-    %orig;
-    NSString *name = NSStringFromClass([self class]);
-
-    // タブバー・Pivot 系
-    if ([name containsString:@"Pivot"] || [name containsString:@"TabBar"]) {
-        static NSMutableSet *_s1;
-        if (!_s1) _s1 = [NSMutableSet set];
-        if (![_s1 containsObject:name]) {
-            [_s1 addObject:name];
-            CFLog(@"[TabVC] %@", name);
-        }
-    }
-
-    // 登録・サブスクリプション・フィード系
-    if ([name containsString:@"Subscri"] || [name containsString:@"Channel"] ||
-        [name containsString:@"Feed"]) {
-        static NSMutableSet *_s2;
-        if (!_s2) _s2 = [NSMutableSet set];
-        if (![_s2 containsObject:name]) {
-            [_s2 addObject:name];
-            CFLog(@"[FeedVC] %@", name);
-            unsigned int cnt = 0;
-            Method *methods = class_copyMethodList([self class], &cnt);
-            for (unsigned int i = 0; i < cnt; i++) {
-                NSString *sel = NSStringFromSelector(method_getName(methods[i]));
-                if ([sel containsString:@"ubscri"] || [sel containsString:@"hannel"] ||
-                    [sel containsString:@"feed"]   || [sel containsString:@"Feed"]) {
-                    CFLog(@"  method: %@", sel);
-                }
-            }
-            free(methods);
-        }
-    }
-
-    // 動画再生・プレイヤー系
-    if ([name containsString:@"Watch"] || [name containsString:@"Player"]) {
-        static NSMutableSet *_s3;
-        if (!_s3) _s3 = [NSMutableSet set];
-        if (![_s3 containsObject:name]) {
-            [_s3 addObject:name];
-            CFLog(@"[WatchVC] %@", name);
-            unsigned int cnt = 0;
-            Method *methods = class_copyMethodList([self class], &cnt);
-            for (unsigned int i = 0; i < cnt; i++) {
-                NSString *sel = NSStringFromSelector(method_getName(methods[i]));
-                if ([sel containsString:@"hannel"] || [sel containsString:@"videoId"] ||
-                    [sel containsString:@"VideoId"]) {
-                    CFLog(@"  channel/video method: %@", sel);
-                }
-            }
-            free(methods);
-        }
-    }
-
-    // アカウント・サインイン系
-    if ([name containsString:@"AccountSwitch"] || [name containsString:@"AddAccount"] ||
-        [name containsString:@"SignIn"]) {
-        static NSMutableSet *_s4;
-        if (!_s4) _s4 = [NSMutableSet set];
-        if (![_s4 containsObject:name]) {
-            [_s4 addObject:name];
-            CFLog(@"[AccountVC] %@", name);
-            unsigned int cnt = 0;
-            Method *methods = class_copyMethodList([self class], &cnt);
-            for (unsigned int i = 0; i < cnt; i++) {
-                NSString *sel = NSStringFromSelector(method_getName(methods[i]));
-                CFLog(@"  method: %@", sel);
-            }
-            free(methods);
-        }
-    }
-}
-%end
-
-// ─── 調査②: ロゴ・ブランド画像名 ──────────────────────────────────────────────
-//
-// クラッシュリスクについて:
-//   imageNamed: は非常に高頻度に呼ばれる。全呼び出しをフックするのではなく
-//   名前フィルタを必ず先に評価（短絡評価）して NSLog/CFLog に落とすのは最小限。
-//   ただし NSUserDefaults synchronize をここで行うと重くなるので CFLog 経由で
-//   バックグラウンドキューに逃がす。
-//
+// ─────────────────────────────────────────────────────────────────────────────
+// 調査③: UIImage imageNamed:inBundle:
+//   - ロゴ系の画像名でフックが呼ばれているか
+//   - バンドルファイルが存在するか
+// ─────────────────────────────────────────────────────────────────────────────
 %hook UIImage
-+ (UIImage *)imageNamed:(NSString *)name {
-    if (name.length > 0 &&
-        ([name hasPrefix:@"yt_"] || [name hasPrefix:@"youtube"] ||
-         [name containsString:@"logo"]    || [name containsString:@"Logo"]    ||
-         [name containsString:@"brand"]   || [name containsString:@"Brand"]   ||
-         [name containsString:@"premium"] || [name containsString:@"Premium"])) {
-        static NSMutableSet *_imgLog;
-        if (!_imgLog) _imgLog = [NSMutableSet set];
-        if (![_imgLog containsObject:name]) {
-            [_imgLog addObject:name];
-            CFLog(@"[imageNamed] %@", name);
-        }
-    }
-    return %orig;
-}
-
 + (UIImage *)imageNamed:(NSString *)name
                inBundle:(NSBundle *)bundle
 compatibleWithTraitCollection:(UITraitCollection *)tc {
-    if (name.length > 0 &&
-        ([name hasPrefix:@"yt_"] || [name hasPrefix:@"youtube"] ||
-         [name containsString:@"logo"]    || [name containsString:@"Logo"]    ||
-         [name containsString:@"brand"]   || [name containsString:@"Brand"]   ||
-         [name containsString:@"premium"] || [name containsString:@"Premium"])) {
-        static NSMutableSet *_imgLog2;
-        if (!_imgLog2) _imgLog2 = [NSMutableSet set];
-        if (![_imgLog2 containsObject:name]) {
-            [_imgLog2 addObject:name];
-            CFLog(@"[imageNamed:bundle] %@ (bundle: %@)",
-                  name, [bundle.bundlePath lastPathComponent]);
+    // ロゴ系の名前だけログ（全呼び出しだと多すぎる）
+    if ([name containsString:@"logo"] || [name containsString:@"Logo"] ||
+        [name containsString:@"premium"] || [name containsString:@"Premium"] ||
+        [name containsString:@"brand"] || [name hasPrefix:@"youtube_logo"] ||
+        [name hasPrefix:@"youtube_premium"]) {
+
+        static NSMutableSet *_seen;
+        if (!_seen) _seen = [NSMutableSet set];
+        if (![_seen containsObject:name]) {
+            [_seen addObject:name];
+
+            // バンドル内のファイル存在確認
+            NSString *bPath = [[NSBundle mainBundle] pathForResource:@"uYouPlus" ofType:@"bundle"];
+            NSBundle *ypBundle = bPath ? [NSBundle bundleWithPath:bPath] : nil;
+            NSString *darkPath  = [ypBundle pathForResource:@"PremiumLogo_dark" ofType:@"png"];
+            NSString *litePath  = [ypBundle pathForResource:@"PremiumLogo_lite" ofType:@"png"];
+
+            CFLog(@"[CF-Logo] imageNamed: '%@' bundle=%@", name, [bundle.bundlePath lastPathComponent]);
+            // バンドルファイル存在確認（初回のみ）
+            static BOOL _bundleChecked = NO;
+            if (!_bundleChecked) {
+                _bundleChecked = YES;
+                CFLog(@"[CF-Logo] uYouPlus.bundle path=%@", bPath ?: @"NOT FOUND");
+                CFLog(@"[CF-Logo] PremiumLogo_dark.png = %@", darkPath ? @"EXISTS" : @"NOT FOUND");
+                CFLog(@"[CF-Logo] PremiumLogo_lite.png = %@", litePath ? @"EXISTS" : @"NOT FOUND");
+            }
+        }
+    }
+    return %orig;
+}
+
++ (UIImage *)imageNamed:(NSString *)name {
+    if ([name containsString:@"logo"] || [name containsString:@"Logo"] ||
+        [name containsString:@"premium"] || [name containsString:@"Premium"] ||
+        [name hasPrefix:@"youtube_logo"] || [name hasPrefix:@"youtube_premium"]) {
+        static NSMutableSet *_seen2;
+        if (!_seen2) _seen2 = [NSMutableSet set];
+        if (![_seen2 containsObject:name]) {
+            [_seen2 addObject:name];
+            CFLog(@"[CF-Logo] imageNamed(no-bundle): '%@'", name);
         }
     }
     return %orig;
 }
 %end
 
-// ─── 調査③: 登録ボタンのクラス名 ─────────────────────────────────────────────
-%hook UIButton
+// ─────────────────────────────────────────────────────────────────────────────
+// 調査④: YTHeaderLogoControllerImpl
+//   - setTopbarLogoRenderer: が呼ばれているか（uYouPlus.xm の gSTARDYLogo と同じクラス）
+// ─────────────────────────────────────────────────────────────────────────────
+%hook YTHeaderLogoControllerImpl
+- (void)setTopbarLogoRenderer:(id)renderer {
+    CFLog(@"[CF-Logo] setTopbarLogoRenderer: called. renderer=%@", NSStringFromClass([renderer class]));
+    %orig;
+}
+%end
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 既存機能: アカウント追加ブロック（変更なし）
+// ─────────────────────────────────────────────────────────────────────────────
+static void cf_showAlert(NSString *title, NSString *message) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIAlertController *alert = [UIAlertController
+            alertControllerWithTitle:title message:message
+            preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK"
+            style:UIAlertActionStyleDefault handler:nil]];
+        UIWindow *w = nil;
+        if (@available(iOS 15, *))
+            for (UIScene *sc in [UIApplication sharedApplication].connectedScenes)
+                if ([sc isKindOfClass:[UIWindowScene class]])
+                    for (UIWindow *win in ((UIWindowScene *)sc).windows)
+                        if (win.isKeyWindow) { w = win; break; }
+        if (!w) w = [UIApplication sharedApplication].keyWindow;
+        UIViewController *root = w.rootViewController;
+        while (root.presentedViewController) root = root.presentedViewController;
+        [root presentViewController:alert animated:YES completion:nil];
+    });
+}
+
+@interface YTInlineSignInViewController : UIViewController
+@end
+%hook YTInlineSignInViewController
+- (void)didTapShowAddAccount {
+    cf_showAlert(@"アカウント追加不可", @"このビルドでは複数アカウントの追加は許可されていません。");
+}
+%end
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 既存機能: 登録ボタン非表示（変更なし）
+// ─────────────────────────────────────────────────────────────────────────────
+@interface YTQTMButton : UIButton
+@end
+%hook YTQTMButton
 - (void)setTitle:(NSString *)title forState:(UIControlState)state {
     %orig;
-    if ([title containsString:@"ubscri"] || [title containsString:@"登録"]) {
-        static NSMutableSet *_btnLog;
-        if (!_btnLog) _btnLog = [NSMutableSet set];
-        NSString *key = [NSString stringWithFormat:@"%@|%@",
-                         NSStringFromClass([self class]), title];
-        if (![_btnLog containsObject:key]) {
-            [_btnLog addObject:key];
-            CFLog(@"[SubscribeBtn] class=%@, title=%@",
-                  NSStringFromClass([self class]), title);
-        }
+    NSString *t = [(UIButton *)self titleForState:UIControlStateNormal];
+    if (t && ([t containsString:@"登録"] || [t isEqualToString:@"Subscribe"])) {
+        self.hidden = YES; self.alpha = 0;
+    }
+}
+- (void)willMoveToWindow:(UIWindow *)newWindow {
+    %orig;
+    if (!newWindow) return;
+    NSString *t = [self titleForState:UIControlStateNormal];
+    if (t && ([t containsString:@"登録"] || [t isEqualToString:@"Subscribe"])) {
+        self.hidden = YES; self.alpha = 0;
     }
 }
 %end
