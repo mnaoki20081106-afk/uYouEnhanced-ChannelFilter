@@ -204,19 +204,20 @@ static void cf_injectBtn(UIWindow *w) {
 // ─────────────────────────────────────────────────────────────────────────────
 %hook YTInnerTubeCollectionViewController
 - (void)loadWithModel:(id)model {
-    NSString *browseId = [self respondsToSelector:@selector(browseId)]
-        ? [self performSelector:@selector(browseId)] : @"(none)";
+    id s = (id)self;
+    NSString *browseId = [s respondsToSelector:@selector(browseId)]
+        ? [s performSelector:@selector(browseId)] : @"(none)";
     NSUInteger count = 0;
     if ([model respondsToSelector:@selector(contentsArray)])
         count = [[model performSelector:@selector(contentsArray)] count];
     CFLog(@"[CF-Feed] loadWithModel: browseId=%@ items=%lu class=%@",
-          browseId, (unsigned long)count, NSStringFromClass([self class]));
+          browseId, (unsigned long)count, NSStringFromClass([s class]));
     %orig;
 }
 
-// displaySections が呼ばれているかも確認
 - (void)displaySectionsWithReloadingSectionControllerByRenderer:(id)renderer {
-    NSMutableArray *secs = [self valueForKey:@"_sectionRenderers"];
+    id s = (id)self;
+    NSMutableArray *secs = [s valueForKey:@"_sectionRenderers"];
     CFLog(@"[CF-Feed] displaySections: _sectionRenderers count=%lu", (unsigned long)secs.count);
     %orig;
 }
