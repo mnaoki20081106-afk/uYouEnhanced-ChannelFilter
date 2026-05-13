@@ -224,6 +224,40 @@ static void cf_injectBtn(UIWindow *w) {
 
 - (void)addSectionsFromArray:(NSArray *)array {
     CFLog(@"[CF-Feed] addSectionsFromArray: count=%lu", (unsigned long)array.count);
+
+    // 最初の呼び出しだけ要素の詳細を調べる
+    static BOOL _inspected = NO;
+    if (!_inspected && array.count > 0) {
+        _inspected = YES;
+        id first = array[0];
+        CFLog(@"[CF-Feed2] sectionClass=%@", NSStringFromClass([first class]));
+
+        // セクション内のアイテム配列を探す
+        NSArray *itemPaths = @[@"contentsArray", @"itemsArray", @"items", @"renderers"];
+        for (NSString *path in itemPaths) {
+            SEL s = NSSelectorFromString(path);
+            if ([first respondsToSelector:s]) {
+                id val = [first performSelector:s];
+                CFLog(@"[CF-Feed2]   section.%@ count=%lu class=%@",
+                      path, (unsigned long)[val count], NSStringFromClass([val class]));
+                if ([val count] > 0) {
+                    id item = val[0];
+                    CFLog(@"[CF-Feed2]   item[0] class=%@", NSStringFromClass([item class]));
+                    // item のメソッドからchannelId関連を探す
+                    unsigned int cnt = 0;
+                    Method *methods = class_copyMethodList([item class], &cnt);
+                    for (unsigned int i = 0; i < cnt; i++) {
+                        NSString *sel = NSStringFromSelector(method_getName(methods[i]));
+                        if ([sel containsString:@"hannel"] || [sel containsString:@"ideo"] ||
+                            [sel containsString:@"ender"] || [sel containsString:@"ontent"]) {
+                            CFLog(@"[CF-Feed2]     item.method: %@", sel);
+                        }
+                    }
+                    free(methods);
+                }
+            }
+        }
+    }
     %orig;
 }
 %end
@@ -239,17 +273,42 @@ static void cf_injectBtn(UIWindow *w) {
     id node = %orig;
     static NSUInteger callCount = 0;
     callCount++;
-    // 最初の5回だけ詳細ログ、以降は10件に1回サマリ
-    if (callCount <= 5 || callCount % 50 == 0) {
-        id renderer = [node respondsToSelector:@selector(renderer)]
-            ? [node performSelector:@selector(renderer)] : nil;
-        NSString *cid = ([renderer respondsToSelector:@selector(channelId)])
-            ? [renderer performSelector:@selector(channelId)] : nil;
-        CFLog(@"[CF-Node] #%lu nodeForItem ip=%ld/%ld rendererClass=%@ channelId=%@",
-              (unsigned long)callCount,
-              (long)ip.section, (long)ip.row,
-              NSStringFromClass([renderer class]),
-              cid ?: @"(nil)");
+
+    // 最初の3回だけ node の詳細を掘り下げる
+    if (callCount <= 3) {
+        CFLog(@"[CF-Node2] #%lu nodeClass=%@", (unsigned long)callCount, NSStringFromClass([node class]));
+
+        // node 自身のメソッド一覧からchannelId・renderer関連を探す
+        unsigned int cnt = 0;
+        Method *methods = class_copyMethodList([node class], &cnt);
+        for (unsigned int i = 0; i < cnt; i++) {
+            NSString *sel = NSStringFromSelector(method_getName(methods[i]));
+            if ([sel containsString:@"hannel"] || [sel containsString:@" renderer"] ||
+                [sel containsString:@"Renderer"] || [sel containsString:@"video"] ||
+                [sel containsString:@"Video"] || [sel containsString:@"model"] ||
+                [sel containsString:@"Model"]) {
+                CFLog(@"[CF-Node2]   method: %@", sel);
+            }
+        }
+        free(methods);
+
+        // よくある経路を全部試す
+        NSArray *paths = @[
+            @"renderer", @"videoRenderer", @"compactVideoRenderer",
+            @"model", @"viewModel", @"contentRenderer",
+            @"itemRenderer", @"richItemRenderer"
+        ];
+        for (NSString *path in paths) {
+            SEL s = NSSelectorFromString(path);
+            if ([node respondsToSelector:s]) {
+                id val = [node performSelector:s];
+                CFLog(@"[CF-Node2]   node.%@ = %@", path, NSStringFromClass([val class]));
+                // そこからさらにchannelIdを試す
+                if ([val respondsToSelector:@selector(channelId)]) {
+                    CFLog(@"[CF-Node2]   node.%@.channelId = %@", path, [val performSelector:@selector(channelId)]);
+                }
+            }
+        }
     }
     return node;
 }
@@ -264,46 +323,70 @@ static void cf_injectBtn(UIWindow *w) {
 + (UIImage *)imageNamed:(NSString *)name
                inBundle:(NSBundle *)bundle
 compatibleWithTraitCollection:(UITraitCollection *)tc {
-    // ロゴ系の名前だけログ（全呼び出しだと多すぎる）
-    if ([name containsString:@"logo"] || [name containsString:@"Logo"] ||
-        [name containsString:@"premium"] || [name containsString:@"Premium"] ||
-        [name containsString:@"brand"] || [name hasPrefix:@"youtube_logo"] ||
-        [name hasPrefix:@"youtube_premium"]) {
 
+    if ([name isEqualToString:@"youtube_logo_dark_cairo"] ||
+        [name isEqualToString:@"youtube_premium_logo_dark_cairo"]) {
+
+        // バンドルパスを取得
+        static NSString *darkPath;
+        static NSString *litePath;
+        static dispatch_once_t once;
+        dispatch_once(&once, ^{
+            NSString *bPath = [[NSBundle mainBundle] pathForResource:@"uYouPlus" ofType:@"bundle"];
+            NSBundle *b = bPath ? [NSBundle bundleWithPath:bPath] : nil;
+            darkPath = [b pathForResource:@"PremiumLogo_dark" ofType:@"png"];
+            litePath = [b pathForResource:@"PremiumLogo_lite" ofType:@"png"];
+        });
+
+        // ダークモード判定
+        BOOL isDark = (tc.userInterfaceStyle == UIUserInterfaceStyleDark)
+            || ([name containsString:@"dark"]);
+        NSString *path = isDark ? darkPath : litePath;
+        if (path) {
+            UIImage *logo = [UIImage imageWithContentsOfFile:path];
+            if (logo) {
+                CFLog(@"[CF-Logo] ✅ replaced '%@' -> %@", name, isDark ? @"dark" : @"lite");
+                return logo;
+            } else {
+                CFLog(@"[CF-Logo] ❌ imageWithContentsOfFile failed: %@", path);
+            }
+        } else {
+            CFLog(@"[CF-Logo] ❌ path not found for %@", name);
+        }
+    }
+
+    // ログ（未置き換えのロゴ系）
+    if ([name containsString:@"logo"] || [name containsString:@"Logo"] ||
+        [name containsString:@"premium"] || [name containsString:@"Premium"]) {
         static NSMutableSet *_seen;
         if (!_seen) _seen = [NSMutableSet set];
         if (![_seen containsObject:name]) {
             [_seen addObject:name];
-
-            // バンドル内のファイル存在確認
-            NSString *bPath = [[NSBundle mainBundle] pathForResource:@"uYouPlus" ofType:@"bundle"];
-            NSBundle *ypBundle = bPath ? [NSBundle bundleWithPath:bPath] : nil;
-            NSString *darkPath  = [ypBundle pathForResource:@"PremiumLogo_dark" ofType:@"png"];
-            NSString *litePath  = [ypBundle pathForResource:@"PremiumLogo_lite" ofType:@"png"];
-
             CFLog(@"[CF-Logo] imageNamed: '%@' bundle=%@", name, [bundle.bundlePath lastPathComponent]);
-            // バンドルファイル存在確認（初回のみ）
-            static BOOL _bundleChecked = NO;
-            if (!_bundleChecked) {
-                _bundleChecked = YES;
-                CFLog(@"[CF-Logo] uYouPlus.bundle path=%@", bPath ?: @"NOT FOUND");
-                CFLog(@"[CF-Logo] PremiumLogo_dark.png = %@", darkPath ? @"EXISTS" : @"NOT FOUND");
-                CFLog(@"[CF-Logo] PremiumLogo_lite.png = %@", litePath ? @"EXISTS" : @"NOT FOUND");
-            }
         }
     }
     return %orig;
 }
 
 + (UIImage *)imageNamed:(NSString *)name {
-    if ([name containsString:@"logo"] || [name containsString:@"Logo"] ||
-        [name containsString:@"premium"] || [name containsString:@"Premium"] ||
-        [name hasPrefix:@"youtube_logo"] || [name hasPrefix:@"youtube_premium"]) {
-        static NSMutableSet *_seen2;
-        if (!_seen2) _seen2 = [NSMutableSet set];
-        if (![_seen2 containsObject:name]) {
-            [_seen2 addObject:name];
-            CFLog(@"[CF-Logo] imageNamed(no-bundle): '%@'", name);
+    if ([name isEqualToString:@"youtube_logo_dark_cairo"] ||
+        [name isEqualToString:@"youtube_premium_logo_dark_cairo"]) {
+        static NSString *darkPath2;
+        static NSString *litePath2;
+        static dispatch_once_t once2;
+        dispatch_once(&once2, ^{
+            NSString *bPath = [[NSBundle mainBundle] pathForResource:@"uYouPlus" ofType:@"bundle"];
+            NSBundle *b = bPath ? [NSBundle bundleWithPath:bPath] : nil;
+            darkPath2 = [b pathForResource:@"PremiumLogo_dark" ofType:@"png"];
+            litePath2 = [b pathForResource:@"PremiumLogo_lite" ofType:@"png"];
+        });
+        NSString *path = darkPath2; // バンドルなし版はダーク固定
+        if (path) {
+            UIImage *logo = [UIImage imageWithContentsOfFile:path];
+            if (logo) {
+                CFLog(@"[CF-Logo] ✅ replaced(no-bundle) '%@'", name);
+                return logo;
+            }
         }
     }
     return %orig;
