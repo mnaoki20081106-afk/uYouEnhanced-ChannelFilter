@@ -53,14 +53,23 @@ static void CFLog(NSString *format, ...) {
     self.title = @"ChannelFilter Debug Log";
     self.view.backgroundColor = [UIColor systemBackgroundColor];
 
-    // 閉じるボタン
-    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc]
+    // 右側：閉じる
+    UIBarButtonItem *closeBtn = [[UIBarButtonItem alloc]
         initWithTitle:@"閉じる"
                style:UIBarButtonItemStylePlain
               target:self
               action:@selector(cf_dismiss)];
 
-    // クリアボタン
+    // 右側：全コピー
+    UIBarButtonItem *copyAllBtn = [[UIBarButtonItem alloc]
+        initWithTitle:@"全コピー"
+               style:UIBarButtonItemStylePlain
+              target:self
+              action:@selector(cf_copyAll)];
+
+    self.navigationItem.rightBarButtonItems = @[closeBtn, copyAllBtn];
+
+    // 左側：クリア
     self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc]
         initWithTitle:@"クリア"
                style:UIBarButtonItemStylePlain
@@ -87,8 +96,28 @@ static void CFLog(NSString *format, ...) {
     [self.tableView reloadData];
 }
 
-- (void)cf_dismiss     { [self dismissViewControllerAnimated:YES completion:nil]; }
-- (void)cf_clearLogs   {
+- (void)cf_dismiss { [self dismissViewControllerAnimated:YES completion:nil]; }
+
+- (void)cf_copyAll {
+    if (self.logs.count == 0) return;
+    // 古い順（正順）でまとめてコピー
+    NSArray *inOrder = [[self.logs reverseObjectEnumerator] allObjects];
+    NSString *all = [inOrder componentsJoinedByString:@"\n"];
+    [UIPasteboard generalPasteboard].string = all;
+
+    // ボタンを一瞬「✓ コピー済」に変えてフィードバック
+    UIBarButtonItem *btn = self.navigationItem.rightBarButtonItems[1];
+    NSString *original = btn.title;
+    btn.title = @"✓ コピー済";
+    btn.enabled = NO;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        btn.title = original;
+        btn.enabled = YES;
+    });
+}
+
+- (void)cf_clearLogs {
     [[NSUserDefaults standardUserDefaults] removeObjectForKey:@"cf_debug_logs"];
     CFLogs = [NSMutableArray array];
     [self cf_reloadLogs];
