@@ -237,7 +237,10 @@ static void cf_injectBtn(UIWindow *w) {
         for (NSString *path in itemPaths) {
             SEL s = NSSelectorFromString(path);
             if ([first respondsToSelector:s]) {
+                #pragma clang diagnostic push
+                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
                 id val = [first performSelector:s];
+                #pragma clang diagnostic pop
                 CFLog(@"[CF-Feed2]   section.%@ count=%lu class=%@",
                       path, (unsigned long)[val count], NSStringFromClass([val class]));
                 if ([val count] > 0) {
@@ -301,7 +304,10 @@ static void cf_injectBtn(UIWindow *w) {
         for (NSString *path in paths) {
             SEL s = NSSelectorFromString(path);
             if ([node respondsToSelector:s]) {
+                #pragma clang diagnostic push
+                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
                 id val = [node performSelector:s];
+                #pragma clang diagnostic pop
                 CFLog(@"[CF-Node2]   node.%@ = %@", path, NSStringFromClass([val class]));
                 // そこからさらにchannelIdを試す
                 if ([val respondsToSelector:@selector(channelId)]) {
