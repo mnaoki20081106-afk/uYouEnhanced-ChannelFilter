@@ -225,15 +225,13 @@ static void cf_injectBtn(UIWindow *w) {
 - (void)addSectionsFromArray:(NSArray *)array {
     CFLog(@"[CF-Feed] addSectionsFromArray: count=%lu", (unsigned long)array.count);
 
-    // YTIItemSectionSupportedRenderers のメソッド一覧を調べる
-    static BOOL _inspected = NO;
-    if (!_inspected) {
+    // 動画アイテム（ghostCard以外）が来るまで毎回調べる
+    static BOOL _foundVideo = NO;
+    if (!_foundVideo) {
         for (NSUInteger si = 0; si < array.count; si++) {
             id section = array[si];
             NSString *secClass = NSStringFromClass([section class]);
             if ([secClass containsString:@"FilterChip"] || [secClass containsString:@"ChipBar"]) continue;
-
-            // contentsArray を取得
             if (![section respondsToSelector:@selector(contentsArray)]) continue;
             #pragma clang diagnostic push
             #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
@@ -241,39 +239,45 @@ static void cf_injectBtn(UIWindow *w) {
             #pragma clang diagnostic pop
             if (!items.count) continue;
 
-            id item = items[0];
-            NSString *itemClass = NSStringFromClass([item class]);
-            CFLog(@"[CF-Feed2] item class=%@", itemClass);
-
-            // YTIItemSectionSupportedRenderers の全メソッドを出力
-            unsigned int cnt = 0;
-            Method *methods = class_copyMethodList([item class], &cnt);
-            for (unsigned int i = 0; i < cnt; i++) {
-                NSString *sel = NSStringFromSelector(method_getName(methods[i]));
-                // getter系のみ（setterとhasは除く）
-                if (![sel hasPrefix:@"set"] && ![sel hasPrefix:@"has"] &&
-                    ![sel hasPrefix:@"_"] && sel.length < 60) {
-                    CFLog(@"[CF-Feed2]   method: %@", sel);
-                    // 文字列を返すメソッドは値も取得
-                    if ([sel containsString:@"Id"] || [sel containsString:@"id"] ||
-                        [sel containsString:@"hannel"] || [sel containsString:@"ideo"]) {
-                        SEL ms = NSSelectorFromString(sel);
-                        @try {
-                            #pragma clang diagnostic push
-                            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                            id v = [item performSelector:ms];
-                            #pragma clang diagnostic pop
-                            if ([v isKindOfClass:[NSString class]] && [(NSString*)v length] > 0)
-                                CFLog(@"[CF-Feed2]     -> '%@'", v);
-                            else if (v)
-                                CFLog(@"[CF-Feed2]     -> class=%@", NSStringFromClass([v class]));
-                        } @catch (NSException *e) {}
+            // 全アイテムを調べる（ghostCardをスキップ）
+            for (id item in items) {
+                // ghostCardだけのアイテムはスキップ
+                unsigned int cnt = 0;
+                Method *methods = class_copyMethodList([item class], &cnt);
+                NSMutableArray *getters = [NSMutableArray array];
+                for (unsigned int i = 0; i < cnt; i++) {
+                    NSString *sel = NSStringFromSelector(method_getName(methods[i]));
+                    if (![sel hasPrefix:@"set"] && ![sel hasPrefix:@"has"] &&
+                        ![sel hasPrefix:@"_"] && sel.length < 80) {
+                        [getters addObject:sel];
                     }
                 }
+                free(methods);
+
+                // ghostCardしか持たないアイテムはスキップ
+                if (getters.count == 1 && [getters[0] isEqualToString:@"ghostCardRenderer"]) continue;
+
+                CFLog(@"[CF-Feed2] ✅ item class=%@ methods=%lu",
+                      NSStringFromClass([item class]), (unsigned long)getters.count);
+                for (NSString *sel in getters) {
+                    CFLog(@"[CF-Feed2]   method: %@", sel);
+                    // 値も取得
+                    SEL ms = NSSelectorFromString(sel);
+                    @try {
+                        #pragma clang diagnostic push
+                        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                        id v = [item performSelector:ms];
+                        #pragma clang diagnostic pop
+                        if ([v isKindOfClass:[NSString class]] && [(NSString*)v length] > 0)
+                            CFLog(@"[CF-Feed2]     -> '%@'", v);
+                        else if (v && ![v isKindOfClass:[NSString class]])
+                            CFLog(@"[CF-Feed2]     -> class=%@", NSStringFromClass([v class]));
+                    } @catch (NSException *e) {}
+                }
+                _foundVideo = YES;
+                break;
             }
-            free(methods);
-            _inspected = YES;
-            break;
+            if (_foundVideo) break;
         }
     }
     %orig;
