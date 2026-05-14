@@ -256,26 +256,44 @@ static void cf_injectBtn(UIWindow *w) {
 
                 // ghostCardしか持たないアイテムはスキップ
                 if (getters.count == 1 && [getters[0] isEqualToString:@"ghostCardRenderer"]) continue;
+                // elementRendererがないアイテムもスキップ
+                BOOL hasElement = NO;
+                for (NSString *g in getters) { if ([g isEqualToString:@"elementRenderer"]) { hasElement = YES; break; } }
+                if (!hasElement) continue;
 
-                CFLog(@"[CF-Feed2] ✅ item class=%@ methods=%lu",
-                      NSStringFromClass([item class]), (unsigned long)getters.count);
-                for (NSString *sel in getters) {
-                    CFLog(@"[CF-Feed2]   method: %@", sel);
-                    // 値も取得
-                    SEL ms = NSSelectorFromString(sel);
+                CFLog(@"[CF-Feed2] ✅ found elementRenderer item");
+
+                // elementRenderer -> YTIElementRenderer を掘り下げる
+                SEL elemSel = NSSelectorFromString(@"elementRenderer");
+                #pragma clang diagnostic push
+                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                id elemRenderer = [item performSelector:elemSel];
+                #pragma clang diagnostic pop
+                if (!elemRenderer) { CFLog(@"[CF-Feed2] elementRenderer is nil"); continue; }
+                CFLog(@"[CF-Feed2] elemRenderer class=%@", NSStringFromClass([elemRenderer class]));
+
+                unsigned int ecnt = 0;
+                Method *emethods = class_copyMethodList([elemRenderer class], &ecnt);
+                for (unsigned int ei = 0; ei < ecnt; ei++) {
+                    NSString *esel = NSStringFromSelector(method_getName(emethods[ei]));
+                    if ([esel hasPrefix:@"set"] || [esel hasPrefix:@"_"] || esel.length > 80) continue;
+                    CFLog(@"[CF-Feed2]   elem: %@", esel);
+                    SEL ems = NSSelectorFromString(esel);
                     @try {
                         #pragma clang diagnostic push
                         #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                        id v = [item performSelector:ms];
+                        id ev = [elemRenderer performSelector:ems];
                         #pragma clang diagnostic pop
-                        if ([v isKindOfClass:[NSString class]] && [(NSString*)v length] > 0)
-                            CFLog(@"[CF-Feed2]     -> '%@'", v);
-                        else if (v && ![v isKindOfClass:[NSString class]])
-                            CFLog(@"[CF-Feed2]     -> class=%@", NSStringFromClass([v class]));
+                        if ([ev isKindOfClass:[NSString class]] && [(NSString*)ev length] > 0)
+                            CFLog(@"[CF-Feed2]     -> '%@'", ev);
+                        else if (ev && ![ev isKindOfClass:[NSString class]])
+                            CFLog(@"[CF-Feed2]     -> class=%@", NSStringFromClass([ev class]));
                     } @catch (NSException *e) {}
                 }
+                free(emethods);
                 _foundVideo = YES;
                 break;
+
             }
             if (_foundVideo) break;
         }
