@@ -225,63 +225,52 @@ static void cf_injectBtn(UIWindow *w) {
 - (void)addSectionsFromArray:(NSArray *)array {
     CFLog(@"[CF-Feed] addSectionsFromArray: count=%lu", (unsigned long)array.count);
 
-    // 全セクションを調べる（フィルターチップ以外の動画セクションを見つけるため）
+    // YTIItemSectionSupportedRenderers のメソッド一覧を調べる
     static BOOL _inspected = NO;
     if (!_inspected) {
         for (NSUInteger si = 0; si < array.count; si++) {
             id section = array[si];
             NSString *secClass = NSStringFromClass([section class]);
-            // フィルターチップはスキップ
             if ([secClass containsString:@"FilterChip"] || [secClass containsString:@"ChipBar"]) continue;
 
-            CFLog(@"[CF-Feed2] section[%lu] class=%@", (unsigned long)si, secClass);
+            // contentsArray を取得
+            if (![section respondsToSelector:@selector(contentsArray)]) continue;
+            NSArray *items = [section contentsArray];
+            if (!items.count) continue;
 
-            NSArray *itemPaths = @[@"contentsArray", @"itemsArray", @"items"];
-            for (NSString *ip2 in itemPaths) {
-                SEL s = NSSelectorFromString(ip2);
-                if (![section respondsToSelector:s]) continue;
-                #pragma clang diagnostic push
-                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                NSArray *items = [section performSelector:s];
-                #pragma clang diagnostic pop
-                if (!items.count) continue;
+            id item = items[0];
+            NSString *itemClass = NSStringFromClass([item class]);
+            CFLog(@"[CF-Feed2] item class=%@", itemClass);
 
-                CFLog(@"[CF-Feed2]   .%@ count=%lu", ip2, (unsigned long)items.count);
-                id item = items[0];
-                CFLog(@"[CF-Feed2]   item[0] class=%@", NSStringFromClass([item class]));
-
-                // channelId を直接持っているか
-                if ([item respondsToSelector:@selector(channelId)]) {
-                    CFLog(@"[CF-Feed2]   ✅ item.channelId=%@", [item performSelector:@selector(channelId)]);
-                    _inspected = YES;
-                }
-
-                // メソッドからchannelId・videoId・browseId関連を探して値も取得
-                unsigned int cnt = 0;
-                Method *methods = class_copyMethodList([item class], &cnt);
-                for (unsigned int i = 0; i < cnt; i++) {
-                    NSString *sel = NSStringFromSelector(method_getName(methods[i]));
-                    if ([sel containsString:@"hannel"] || [sel containsString:@"videoId"] ||
-                        [sel containsString:@"browseId"] || [sel isEqualToString:@"videoId"]) {
-                        CFLog(@"[CF-Feed2]   item.method: %@", sel);
-                        if (![sel hasPrefix:@"set"] && ![sel hasPrefix:@"has"]) {
-                            SEL ms = NSSelectorFromString(sel);
-                            @try {
-                                #pragma clang diagnostic push
-                                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                                id v = [item performSelector:ms];
-                                #pragma clang diagnostic pop
-                                if ([v isKindOfClass:[NSString class]] && [(NSString*)v length] > 0)
-                                    CFLog(@"[CF-Feed2]     -> '%@'", v);
-                            } @catch (NSException *e) {}
-                        }
+            // YTIItemSectionSupportedRenderers の全メソッドを出力
+            unsigned int cnt = 0;
+            Method *methods = class_copyMethodList([item class], &cnt);
+            for (unsigned int i = 0; i < cnt; i++) {
+                NSString *sel = NSStringFromSelector(method_getName(methods[i]));
+                // getter系のみ（setterとhasは除く）
+                if (![sel hasPrefix:@"set"] && ![sel hasPrefix:@"has"] &&
+                    ![sel hasPrefix:@"_"] && sel.length < 60) {
+                    CFLog(@"[CF-Feed2]   method: %@", sel);
+                    // 文字列を返すメソッドは値も取得
+                    if ([sel containsString:@"Id"] || [sel containsString:@"id"] ||
+                        [sel containsString:@"hannel"] || [sel containsString:@"ideo"]) {
+                        SEL ms = NSSelectorFromString(sel);
+                        @try {
+                            #pragma clang diagnostic push
+                            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                            id v = [item performSelector:ms];
+                            #pragma clang diagnostic pop
+                            if ([v isKindOfClass:[NSString class]] && [(NSString*)v length] > 0)
+                                CFLog(@"[CF-Feed2]     -> '%@'", v);
+                            else if (v)
+                                CFLog(@"[CF-Feed2]     -> class=%@", NSStringFromClass([v class]));
+                        } @catch (NSException *e) {}
                     }
                 }
-                free(methods);
-                _inspected = YES;
-                break;
             }
-            if (_inspected) break;
+            free(methods);
+            _inspected = YES;
+            break;
         }
     }
     %orig;
@@ -379,8 +368,18 @@ compatibleWithTraitCollection:(UITraitCollection *)tc {
         dispatch_once(&once, ^{
             NSString *bPath = [[NSBundle mainBundle] pathForResource:@"uYouPlus" ofType:@"bundle"];
             NSBundle *b = bPath ? [NSBundle bundleWithPath:bPath] : nil;
-            darkPath = [b pathForResource:@"Premiumlogo_dark" ofType:@"png"];
-            litePath = [b pathForResource:@"Premiumlogo_lite" ofType:@"png"];
+            darkPath = [b pathForResource:@"PremiumLogo_dark" ofType:@"png"];
+            litePath = [b pathForResource:@"PremiumLogo_lite" ofType:@"png"];
+            // バンドル内の全pngファイルをログ出力
+            CFLog(@"[CF-Logo-DEBUG] bPath=%@", bPath ?: @"NIL");
+            NSArray *pngs = [[NSFileManager defaultManager]
+                contentsOfDirectoryAtPath:bPath error:nil];
+            for (NSString *f in pngs) {
+                if ([f hasSuffix:@".png"] || [f containsString:@"Logo"])
+                    CFLog(@"[CF-Logo-DEBUG] file: %@", f);
+            }
+            CFLog(@"[CF-Logo-DEBUG] darkPath=%@", darkPath ?: @"NIL");
+            CFLog(@"[CF-Logo-DEBUG] litePath=%@", litePath ?: @"NIL");
         });
 
         // ダークモード判定
@@ -422,8 +421,8 @@ compatibleWithTraitCollection:(UITraitCollection *)tc {
         dispatch_once(&once2, ^{
             NSString *bPath = [[NSBundle mainBundle] pathForResource:@"uYouPlus" ofType:@"bundle"];
             NSBundle *b = bPath ? [NSBundle bundleWithPath:bPath] : nil;
-            darkPath2 = [b pathForResource:@"Premiumlogo_dark" ofType:@"png"];
-            litePath2 = [b pathForResource:@"Premiumlogo_lite" ofType:@"png"];
+            darkPath2 = [b pathForResource:@"PremiumLogo_dark" ofType:@"png"];
+            litePath2 = [b pathForResource:@"PremiumLogo_lite" ofType:@"png"];
         });
         NSString *path = darkPath2; // バンドルなし版はダーク固定
         if (path) {
