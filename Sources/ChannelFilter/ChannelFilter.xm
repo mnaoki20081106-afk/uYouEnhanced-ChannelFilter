@@ -324,12 +324,50 @@ static void cf_injectBtn(UIWindow *w) {
 %hook ASCollectionView
 - (id)nodeForItemAtIndexPath:(NSIndexPath *)ip {
     id node = %orig;
-    static NSUInteger callCount = 0;
-    callCount++;
+    static BOOL _elmInspected = NO;
+    if (!_elmInspected) {
+        // ASWrapperCellNode -> sectionController -> ELMNodeController を探す
+        // nodeControllerForNode: / _nodeController / nodeController 等を試す
+        NSArray *paths = @[@"nodeController", @"_nodeController",
+                           @"sectionController", @"_sectionController",
+                           @"controller", @"_controller"];
+        for (NSString *p in paths) {
+            SEL s = NSSelectorFromString(p);
+            if (![node respondsToSelector:s]) continue;
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            id ctrl = [node performSelector:s];
+            #pragma clang diagnostic pop
+            if (!ctrl) continue;
+            CFLog(@"[CF-ELM] node.%@ = %@", p, NSStringFromClass([ctrl class]));
 
-    // 最初の1回だけ node のクラス名を記録（クラッシュ回避のため呼び出しなし）
-    if (callCount <= 1) {
-        CFLog(@"[CF-Node2] #%lu nodeClass=%@", (unsigned long)callCount, NSStringFromClass([node class]));
+            // ctrl のメソッド名のみ列挙
+            unsigned int cnt = 0;
+            Method *methods = class_copyMethodList([ctrl class], &cnt);
+            for (unsigned int i = 0; i < cnt; i++) {
+                NSString *sel = NSStringFromSelector(method_getName(methods[i]));
+                if ([sel hasPrefix:@"set"] || [sel hasPrefix:@"_"] || sel.length > 80) continue;
+                CFLog(@"[CF-ELM]   ctrl.method: %@", sel);
+            }
+            free(methods);
+            _elmInspected = YES;
+            break;
+        }
+        if (!_elmInspected) {
+            // 全メソッドからcontroller/model/renderer関連を探す
+            unsigned int cnt = 0;
+            Method *methods = class_copyMethodList([node class], &cnt);
+            for (unsigned int i = 0; i < cnt; i++) {
+                NSString *sel = NSStringFromSelector(method_getName(methods[i]));
+                if ([sel hasPrefix:@"set"] || [sel hasPrefix:@"_"] || sel.length > 80) continue;
+                if ([sel containsString:@"ontroller"] || [sel containsString:@"odel"] ||
+                    [sel containsString:@"ender"] || [sel containsString:@"hannel"]) {
+                    CFLog(@"[CF-ELM] node.method: %@", sel);
+                }
+            }
+            free(methods);
+            _elmInspected = YES;
+        }
     }
     return node;
 }
