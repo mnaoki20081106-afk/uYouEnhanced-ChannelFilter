@@ -225,40 +225,63 @@ static void cf_injectBtn(UIWindow *w) {
 - (void)addSectionsFromArray:(NSArray *)array {
     CFLog(@"[CF-Feed] addSectionsFromArray: count=%lu", (unsigned long)array.count);
 
-    // 最初の呼び出しだけ要素の詳細を調べる
+    // 全セクションを調べる（フィルターチップ以外の動画セクションを見つけるため）
     static BOOL _inspected = NO;
-    if (!_inspected && array.count > 0) {
-        _inspected = YES;
-        id first = array[0];
-        CFLog(@"[CF-Feed2] sectionClass=%@", NSStringFromClass([first class]));
+    if (!_inspected) {
+        for (NSUInteger si = 0; si < array.count; si++) {
+            id section = array[si];
+            NSString *secClass = NSStringFromClass([section class]);
+            // フィルターチップはスキップ
+            if ([secClass containsString:@"FilterChip"] || [secClass containsString:@"ChipBar"]) continue;
 
-        // セクション内のアイテム配列を探す
-        NSArray *itemPaths = @[@"contentsArray", @"itemsArray", @"items", @"renderers"];
-        for (NSString *path in itemPaths) {
-            SEL s = NSSelectorFromString(path);
-            if ([first respondsToSelector:s]) {
+            CFLog(@"[CF-Feed2] section[%lu] class=%@", (unsigned long)si, secClass);
+
+            NSArray *itemPaths = @[@"contentsArray", @"itemsArray", @"items"];
+            for (NSString *ip2 in itemPaths) {
+                SEL s = NSSelectorFromString(ip2);
+                if (![section respondsToSelector:s]) continue;
                 #pragma clang diagnostic push
                 #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                id val = [first performSelector:s];
+                NSArray *items = [section performSelector:s];
                 #pragma clang diagnostic pop
-                CFLog(@"[CF-Feed2]   section.%@ count=%lu class=%@",
-                      path, (unsigned long)[val count], NSStringFromClass([val class]));
-                if ([val count] > 0) {
-                    id item = val[0];
-                    CFLog(@"[CF-Feed2]   item[0] class=%@", NSStringFromClass([item class]));
-                    // item のメソッドからchannelId関連を探す
-                    unsigned int cnt = 0;
-                    Method *methods = class_copyMethodList([item class], &cnt);
-                    for (unsigned int i = 0; i < cnt; i++) {
-                        NSString *sel = NSStringFromSelector(method_getName(methods[i]));
-                        if ([sel containsString:@"hannel"] || [sel containsString:@"ideo"] ||
-                            [sel containsString:@"ender"] || [sel containsString:@"ontent"]) {
-                            CFLog(@"[CF-Feed2]     item.method: %@", sel);
+                if (!items.count) continue;
+
+                CFLog(@"[CF-Feed2]   .%@ count=%lu", ip2, (unsigned long)items.count);
+                id item = items[0];
+                CFLog(@"[CF-Feed2]   item[0] class=%@", NSStringFromClass([item class]));
+
+                // channelId を直接持っているか
+                if ([item respondsToSelector:@selector(channelId)]) {
+                    CFLog(@"[CF-Feed2]   ✅ item.channelId=%@", [item performSelector:@selector(channelId)]);
+                    _inspected = YES;
+                }
+
+                // メソッドからchannelId・videoId・browseId関連を探して値も取得
+                unsigned int cnt = 0;
+                Method *methods = class_copyMethodList([item class], &cnt);
+                for (unsigned int i = 0; i < cnt; i++) {
+                    NSString *sel = NSStringFromSelector(method_getName(methods[i]));
+                    if ([sel containsString:@"hannel"] || [sel containsString:@"videoId"] ||
+                        [sel containsString:@"browseId"] || [sel isEqualToString:@"videoId"]) {
+                        CFLog(@"[CF-Feed2]   item.method: %@", sel);
+                        if (![sel hasPrefix:@"set"] && ![sel hasPrefix:@"has"]) {
+                            SEL ms = NSSelectorFromString(sel);
+                            @try {
+                                #pragma clang diagnostic push
+                                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                                id v = [item performSelector:ms];
+                                #pragma clang diagnostic pop
+                                if ([v isKindOfClass:[NSString class]] && [(NSString*)v length] > 0)
+                                    CFLog(@"[CF-Feed2]     -> '%@'", v);
+                            } @catch (NSException *e) {}
                         }
                     }
-                    free(methods);
                 }
+                free(methods);
+                _inspected = YES;
+                break;
             }
+            if (_inspected) break;
         }
     }
     %orig;
@@ -281,15 +304,32 @@ static void cf_injectBtn(UIWindow *w) {
     if (callCount <= 3) {
         CFLog(@"[CF-Node2] #%lu nodeClass=%@", (unsigned long)callCount, NSStringFromClass([node class]));
 
-        // node 自身のメソッド一覧からchannelId・renderer関連を探す
+        // ASWrapperCellNode の場合は wrappedNode / view / _view から中身を取り出す
+        id inner = node;
+        NSArray *wrapPaths = @[@"wrappedSectionController", @"node", @"_view", @"view"];
+        for (NSString *wp in wrapPaths) {
+            SEL ws = NSSelectorFromString(wp);
+            if ([inner respondsToSelector:ws]) {
+                #pragma clang diagnostic push
+                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                id wrapped = [inner performSelector:ws];
+                #pragma clang diagnostic pop
+                if (wrapped && wrapped != inner) {
+                    CFLog(@"[CF-Node2]   via .%@: %@", wp, NSStringFromClass([wrapped class]));
+                    inner = wrapped;
+                    break;
+                }
+            }
+        }
+
+        // inner のメソッド一覧からchannelId・renderer関連を探す
         unsigned int cnt = 0;
-        Method *methods = class_copyMethodList([node class], &cnt);
+        Method *methods = class_copyMethodList([inner class], &cnt);
         for (unsigned int i = 0; i < cnt; i++) {
             NSString *sel = NSStringFromSelector(method_getName(methods[i]));
-            if ([sel containsString:@"hannel"] || [sel containsString:@" renderer"] ||
-                [sel containsString:@"Renderer"] || [sel containsString:@"video"] ||
-                [sel containsString:@"Video"] || [sel containsString:@"model"] ||
-                [sel containsString:@"Model"]) {
+            if ([sel containsString:@"hannel"] || [sel containsString:@"Renderer"] ||
+                [sel containsString:@"renderer"] || [sel containsString:@"ideo"] ||
+                [sel containsString:@"model"] || [sel containsString:@"Model"]) {
                 CFLog(@"[CF-Node2]   method: %@", sel);
             }
         }
@@ -299,19 +339,18 @@ static void cf_injectBtn(UIWindow *w) {
         NSArray *paths = @[
             @"renderer", @"videoRenderer", @"compactVideoRenderer",
             @"model", @"viewModel", @"contentRenderer",
-            @"itemRenderer", @"richItemRenderer"
+            @"itemRenderer", @"richItemRenderer", @"sectionController"
         ];
         for (NSString *path in paths) {
             SEL s = NSSelectorFromString(path);
-            if ([node respondsToSelector:s]) {
+            if ([inner respondsToSelector:s]) {
                 #pragma clang diagnostic push
                 #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                id val = [node performSelector:s];
+                id val = [inner performSelector:s];
                 #pragma clang diagnostic pop
-                CFLog(@"[CF-Node2]   node.%@ = %@", path, NSStringFromClass([val class]));
-                // そこからさらにchannelIdを試す
+                CFLog(@"[CF-Node2]   inner.%@ = %@", path, NSStringFromClass([val class]));
                 if ([val respondsToSelector:@selector(channelId)]) {
-                    CFLog(@"[CF-Node2]   node.%@.channelId = %@", path, [val performSelector:@selector(channelId)]);
+                    CFLog(@"[CF-Node2]   inner.%@.channelId = %@", path, [val performSelector:@selector(channelId)]);
                 }
             }
         }
@@ -340,8 +379,8 @@ compatibleWithTraitCollection:(UITraitCollection *)tc {
         dispatch_once(&once, ^{
             NSString *bPath = [[NSBundle mainBundle] pathForResource:@"uYouPlus" ofType:@"bundle"];
             NSBundle *b = bPath ? [NSBundle bundleWithPath:bPath] : nil;
-            darkPath = [b pathForResource:@"PremiumLogo_dark" ofType:@"png"];
-            litePath = [b pathForResource:@"PremiumLogo_lite" ofType:@"png"];
+            darkPath = [b pathForResource:@"Premiumlogo_dark" ofType:@"png"];
+            litePath = [b pathForResource:@"Premiumlogo_lite" ofType:@"png"];
         });
 
         // ダークモード判定
@@ -383,8 +422,8 @@ compatibleWithTraitCollection:(UITraitCollection *)tc {
         dispatch_once(&once2, ^{
             NSString *bPath = [[NSBundle mainBundle] pathForResource:@"uYouPlus" ofType:@"bundle"];
             NSBundle *b = bPath ? [NSBundle bundleWithPath:bPath] : nil;
-            darkPath2 = [b pathForResource:@"PremiumLogo_dark" ofType:@"png"];
-            litePath2 = [b pathForResource:@"PremiumLogo_lite" ofType:@"png"];
+            darkPath2 = [b pathForResource:@"Premiumlogo_dark" ofType:@"png"];
+            litePath2 = [b pathForResource:@"Premiumlogo_lite" ofType:@"png"];
         });
         NSString *path = darkPath2; // バンドルなし版はダーク固定
         if (path) {
