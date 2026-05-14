@@ -235,7 +235,10 @@ static void cf_injectBtn(UIWindow *w) {
 
             // contentsArray を取得
             if (![section respondsToSelector:@selector(contentsArray)]) continue;
-            NSArray *items = [section contentsArray];
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            NSArray *items = [section performSelector:@selector(contentsArray)];
+            #pragma clang diagnostic pop
             if (!items.count) continue;
 
             id item = items[0];
