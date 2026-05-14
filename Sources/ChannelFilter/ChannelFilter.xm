@@ -274,15 +274,36 @@ static void cf_injectBtn(UIWindow *w) {
                 if (!elemRenderer) { CFLog(@"[CF-Feed2] elementRenderer is nil"); continue; }
                 CFLog(@"[CF-Feed2] elemRenderer class=%@", NSStringFromClass([elemRenderer class]));
 
-                // メソッド名のみ列挙（値は取得しない→クラッシュ回避）
-                unsigned int ecnt = 0;
-                Method *emethods = class_copyMethodList([elemRenderer class], &ecnt);
-                for (unsigned int ei = 0; ei < ecnt; ei++) {
-                    NSString *esel = NSStringFromSelector(method_getName(emethods[ei]));
-                    if ([esel hasPrefix:@"set"] || [esel hasPrefix:@"_"] || esel.length > 80) continue;
-                    CFLog(@"[CF-Feed2]   elem: %@", esel);
+                // elementData を安全に取得してクラス名だけ記録
+                if ([elemRenderer respondsToSelector:@selector(elementData)]) {
+                    #pragma clang diagnostic push
+                    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                    id elemData = [elemRenderer performSelector:@selector(elementData)];
+                    #pragma clang diagnostic pop
+                    CFLog(@"[CF-Feed2] elementData class=%@", NSStringFromClass([elemData class]));
+
+                    // elementData のメソッド名のみ列挙（呼び出しなし）
+                    if (elemData) {
+                        unsigned int ecnt = 0;
+                        Method *emethods = class_copyMethodList([elemData class], &ecnt);
+                        for (unsigned int ei = 0; ei < ecnt; ei++) {
+                            NSString *esel = NSStringFromSelector(method_getName(emethods[ei]));
+                            if ([esel hasPrefix:@"set"] || [esel hasPrefix:@"_"] || esel.length > 80) continue;
+                            CFLog(@"[CF-Feed2]   data.method: %@", esel);
+                        }
+                        free(emethods);
+                    }
+                } else {
+                    CFLog(@"[CF-Feed2] elementData not found");
+                    // elementDataがない場合はtitleとtrackingParamsだけ記録
+                    if ([elemRenderer respondsToSelector:@selector(title)]) {
+                        #pragma clang diagnostic push
+                        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                        id title = [elemRenderer performSelector:@selector(title)];
+                        #pragma clang diagnostic pop
+                        CFLog(@"[CF-Feed2] title class=%@", NSStringFromClass([title class]));
+                    }
                 }
-                free(emethods);
                 _foundVideo = YES;
                 break;
 
