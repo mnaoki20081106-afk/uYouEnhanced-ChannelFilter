@@ -1,18 +1,23 @@
 //
-//  ChannelFilter.xm — デバッグビルド v3
+//  ChannelFilter.xm
+//  uYouEnhanced - ChannelFilter
 //
-//  目的: 以下を確認する
-//    [CF-Logo]  ロゴ画像フックが実際に呼ばれているか / 画像ファイルが見つかるか
-//    [CF-Feed]  フィードフックが呼ばれているか / browseId が何か
-//    [CF-Node]  ASCollectionView.nodeForItemAtIndexPath: が呼ばれているか（既存コード）
-//    [CF-Sync]  ホワイトリスト同期が動いているか
+//  実装済み機能（全て常時ON・ユーザー解除不可）:
+//    1. チャンネルフィルター  - ホーム・検索・探索フィードからホワイトリスト外チャンネルを除去
+//                             - 登録チャンネルタブ(YTBrowseViewController/browseId=FEsubscriptions)
+//                               を開くとホワイトリストを自動同期
+//    2. アカウント追加ブロック - YTInlineSignInViewController.didTapShowAddAccount をブロック
+//    3. 登録ボタン非表示      - YTQTMButton を hidden
+//    4. STARDYロゴ置き換え   - UIImage +imageNamed:inBundle: をフックして差し替え
 //
-//  使い方:
-//    1. ビルド・インストール
-//    2. アプリ起動 → CF Logsボタン → ログ確認
-//    3. 登録チャンネルタブを開く → ログ確認
-//    4. 検索タブで何か検索 → ログ確認
-//    5. ホームタブに戻る → ログ確認
+//  フィルター実装方針:
+//    YTIElementRenderer.elementData (_NSInlineData = Protobufバイナリ) を
+//    ISO Latin-1 で文字列化し、正規表現 UC[A-Za-z0-9_-]{22} で channelId を抽出。
+//    (Gemini提案によるバイナリ検索アプローチ - CF Logで動作確認済み)
+//
+//  注意:
+//    - %ctor は uYouPlus.xm の %init; で自動初期化されるため書かない
+//    - ASCollectionView は uYouPlus.xm でフック済みのため使わない
 //
 
 #import <UIKit/UIKit.h>
@@ -20,244 +25,119 @@
 #import <objc/runtime.h>
 #import "ChannelWhitelist.h"
 
-// ─── ログシステム ─────────────────────────────────────────────────────────────
-static NSMutableArray *_cfLogs;
+// ─────────────────────────────────────────────────────────────────────────────
+// 前方宣言
+// ─────────────────────────────────────────────────────────────────────────────
+@interface YTInlineSignInViewController : UIViewController
+- (void)didTapShowAddAccount;
+@end
 
-static void CFLog(NSString *format, ...) {
-    va_list args;
-    va_start(args, format);
-    NSString *msg = [[NSString alloc] initWithFormat:format arguments:args];
-    va_end(args);
-    NSLog(@"[CF] %@", msg);
+@interface YTQTMButton : UIButton
+@end
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ヘルパー: アラート表示
+// ─────────────────────────────────────────────────────────────────────────────
+static void cf_showAlert(NSString *title, NSString *message) {
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (!_cfLogs) {
-            NSArray *saved = [[NSUserDefaults standardUserDefaults] arrayForKey:@"cf_debug_logs"];
-            _cfLogs = saved ? [saved mutableCopy] : [NSMutableArray array];
-        }
-        [_cfLogs addObject:msg];
-        if (_cfLogs.count > 800) [_cfLogs removeObjectAtIndex:0];
-        [[NSUserDefaults standardUserDefaults] setObject:[_cfLogs copy] forKey:@"cf_debug_logs"];
-        [[NSUserDefaults standardUserDefaults] synchronize];
-    });
-}
-
-// ─── ログビューア ─────────────────────────────────────────────────────────────
-@interface CFLogViewController : UIViewController <UITableViewDataSource, UITableViewDelegate>
-@property (nonatomic, strong) UITableView *tableView;
-@property (nonatomic, strong) NSArray *logs;
-@end
-
-@implementation CFLogViewController
-- (void)viewDidLoad {
-    [super viewDidLoad];
-    self.title = @"CF Debug Log";
-    self.view.backgroundColor = [UIColor systemBackgroundColor];
-
-    UIBarButtonItem *closeBtn = [[UIBarButtonItem alloc]
-        initWithTitle:@"閉じる" style:UIBarButtonItemStylePlain
-               target:self action:@selector(cf_dismiss)];
-    UIBarButtonItem *copyBtn = [[UIBarButtonItem alloc]
-        initWithTitle:@"全コピー" style:UIBarButtonItemStylePlain
-               target:self action:@selector(cf_copyAll)];
-    self.navigationItem.rightBarButtonItems = @[closeBtn, copyBtn];
-    self.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc]
-        initWithTitle:@"クリア" style:UIBarButtonItemStylePlain
-               target:self action:@selector(cf_clear)];
-
-    self.tableView = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStylePlain];
-    self.tableView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    self.tableView.dataSource = self;
-    self.tableView.delegate = self;
-    self.tableView.rowHeight = UITableViewAutomaticDimension;
-    self.tableView.estimatedRowHeight = 40;
-    [self.view addSubview:self.tableView];
-    [self cf_reload];
-}
-- (void)cf_reload {
-    NSArray *saved = [[NSUserDefaults standardUserDefaults] arrayForKey:@"cf_debug_logs"];
-    self.logs = saved ? [[saved reverseObjectEnumerator] allObjects] : @[];
-    [self.tableView reloadData];
-}
-- (void)cf_dismiss { [self dismissViewControllerAnimated:YES completion:nil]; }
-- (void)cf_clear {
-    [[NSUserDefaults standardUserDefaults] removeObjectForKey:@"cf_debug_logs"];
-    _cfLogs = [NSMutableArray array];
-    [self cf_reload];
-}
-- (void)cf_copyAll {
-    if (!self.logs.count) return;
-    NSArray *ordered = [[self.logs reverseObjectEnumerator] allObjects];
-    [UIPasteboard generalPasteboard].string = [ordered componentsJoinedByString:@"\n"];
-    UIBarButtonItem *btn = self.navigationItem.rightBarButtonItems[1];
-    btn.title = @"✓ 済";
-    btn.enabled = NO;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        btn.title = @"全コピー"; btn.enabled = YES;
-    });
-}
-- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s { return (NSInteger)self.logs.count; }
-- (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
-    UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:@"c"];
-    if (!cell) {
-        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"c"];
-        cell.textLabel.numberOfLines = 0;
-        cell.textLabel.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
-        cell.selectionStyle = UITableViewCellSelectionStyleNone;
-    }
-    cell.textLabel.text = self.logs[(NSUInteger)ip.row];
-    return cell;
-}
-- (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
-    [UIPasteboard generalPasteboard].string = self.logs[(NSUInteger)ip.row];
-}
-@end
-
-// ─── ログビューアを開く ───────────────────────────────────────────────────────
-static void cf_openLogViewer(void) {
-    UIWindow *window = nil;
-    if (@available(iOS 15, *)) {
-        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-            if ([scene isKindOfClass:[UIWindowScene class]])
-                for (UIWindow *w in ((UIWindowScene *)scene).windows)
-                    if (w.isKeyWindow) { window = w; break; }
-        }
-    }
-    if (!window) window = [UIApplication sharedApplication].keyWindow;
-    UIViewController *root = window.rootViewController;
-    while (root.presentedViewController) root = root.presentedViewController;
-    CFLogViewController *vc = [[CFLogViewController alloc] init];
-    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
-    nav.modalPresentationStyle = UIModalPresentationFormSheet;
-    [root presentViewController:nav animated:YES completion:nil];
-}
-
-// ─── フローティングボタン ─────────────────────────────────────────────────────
-static const char kCFBtnKey = 0;
-
-static void cf_injectBtn(UIWindow *w) {
-    if (!w || objc_getAssociatedObject(w, &kCFBtnKey)) return;
-    UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
-    btn.frame = CGRectMake(20, 120, 90, 36);
-    btn.backgroundColor = [UIColor colorWithWhite:0 alpha:0.75];
-    [btn setTitle:@"CF Logs" forState:UIControlStateNormal];
-    [btn setTitleColor:[UIColor cyanColor] forState:UIControlStateNormal];
-    btn.titleLabel.font = [UIFont boldSystemFontOfSize:12];
-    btn.layer.cornerRadius = 18;
-    btn.clipsToBounds = YES;
-    [btn addTarget:btn action:@selector(cf_tap) forControlEvents:UIControlEventTouchUpInside];
-    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:btn action:@selector(cf_pan:)];
-    [btn addGestureRecognizer:pan];
-    [w addSubview:btn];
-    objc_setAssociatedObject(w, &kCFBtnKey, btn, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-}
-
-// ─── フローティングボタンのアクション (%hook で追加) ─────────────────────────
-%hook UIButton
-%new
-- (void)cf_tap { cf_openLogViewer(); }
-%new
-- (void)cf_pan:(UIPanGestureRecognizer *)pan {
-    UIView *v = pan.view;
-    CGPoint t = [pan translationInView:v.superview];
-    CGRect b = v.superview.bounds;
-    CGFloat hw = v.frame.size.width/2, hh = v.frame.size.height/2;
-    CGPoint c = CGPointMake(
-        MAX(hw, MIN(b.size.width - hw, v.center.x + t.x)),
-        MAX(hh + 20, MIN(b.size.height - hh - 20, v.center.y + t.y)));
-    v.center = c;
-    [pan setTranslation:CGPointZero inView:v.superview];
-}
-%end
-
-// ─── UIWindow フック: ウィンドウ切り替えに追従 ───────────────────────────────
-%hook UIWindow
-- (void)becomeKeyWindow {
-    %orig;
-    dispatch_async(dispatch_get_main_queue(), ^{ cf_injectBtn(self); });
-}
-%end
-
-// ─── 登録チャンネルタブのVC特定 ──────────────────────────────────────────────
-// Subscriptions / Feed / Browse / Library 系のVCが出たらメソッド一覧を出す
-%hook UIViewController
-- (void)viewDidAppear:(BOOL)animated {
-    %orig;
-    NSString *name = NSStringFromClass([(id)self class]);
-    if ([name containsString:@"Subscri"] || [name containsString:@"Library"] ||
-        [name containsString:@"Browse"] || [name containsString:@"Channels"]) {
-        static NSMutableSet *_seen;
-        if (!_seen) _seen = [NSMutableSet set];
-        if (![_seen containsObject:name]) {
-            [_seen addObject:name];
-            CFLog(@"[CF-VC] appeared: %@", name);
-        }
-    }
-}
-%end
-
-// ─── YTAppDelegate: 起動時に注入 ─────────────────────────────────────────────
-%hook YTAppDelegate
-- (void)applicationDidBecomeActive:(UIApplication *)app {
-    %orig;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        UIWindow *w = nil;
+        UIAlertController *alert = [UIAlertController
+            alertControllerWithTitle:title
+                             message:message
+                      preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK"
+                                                 style:UIAlertActionStyleDefault
+                                               handler:nil]];
+        UIWindow *window = nil;
         if (@available(iOS 15, *)) {
-            for (UIScene *sc in app.connectedScenes)
-                if ([sc isKindOfClass:[UIWindowScene class]])
-                    for (UIWindow *win in ((UIWindowScene *)sc).windows)
-                        if (win.isKeyWindow) { w = win; break; }
+            for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+                if ([scene isKindOfClass:[UIWindowScene class]])
+                    for (UIWindow *w in ((UIWindowScene *)scene).windows)
+                        if (w.isKeyWindow) { window = w; break; }
+            }
         }
-        if (!w) w = app.keyWindow;
-        cf_injectBtn(w);
-        CFLog(@"[System] App active. WL empty=%d", (int)[[CFWhitelistManager sharedManager] isEmpty]);
+        if (!window) window = [UIApplication sharedApplication].keyWindow;
+        UIViewController *root = window.rootViewController;
+        while (root.presentedViewController) root = root.presentedViewController;
+        [root presentViewController:alert animated:YES completion:nil];
     });
 }
-%end
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 調査①: YTInnerTubeCollectionViewController
-//   - loadWithModel: が呼ばれているか
-//   - browseId は何か
-//   - model.contentsArray の件数
+// ヘルパー: elementData (Protobufバイナリ) から channelId を抽出
+//
+// Geminiの提案:
+//   channelId は "UC" + 22文字の形式でバイナリ内に平文格納されている。
+//   NSData を ISO Latin-1 で文字列化し正規表現で抽出する。
+//   CF Logで UC... 形式のchannelIdが取れることを確認済み。
 // ─────────────────────────────────────────────────────────────────────────────
+static NSRegularExpression *cf_channelIdRegex(void) {
+    static NSRegularExpression *regex;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        regex = [NSRegularExpression
+            regularExpressionWithPattern:@"UC[A-Za-z0-9_-]{22}"
+            options:0 error:nil];
+    });
+    return regex;
+}
+
+static NSString *cf_extractChannelId(NSData *data) {
+    if (!data) return nil;
+    NSString *raw = [[NSString alloc] initWithData:data
+                                          encoding:NSISOLatin1StringEncoding];
+    if (!raw) return nil;
+    NSTextCheckingResult *match = [cf_channelIdRegex()
+        firstMatchInString:raw options:0 range:NSMakeRange(0, raw.length)];
+    if (!match) return nil;
+    return [raw substringWithRange:match.range];
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 機能1: チャンネルフィルター + ホワイトリスト同期
+//
+// フックポイント: YTInnerTubeCollectionViewController.addSectionsFromArray:
+//
+// 動作:
+//   - 登録チャンネルタブ (YTBrowseViewController / FEsubscriptions) のとき:
+//     セクション内の全 channelId を収集してホワイトリストに同期
+//   - それ以外のフィード (ホーム・検索・探索):
+//     ホワイトリスト外の channelId を持つアイテムをデータモデルから除去
+//
+// CF Logで確認した登録チャンネルタブのVC:
+//   YTBrowseViewController / YTBrowseResponseViewController
+// ─────────────────────────────────────────────────────────────────────────────
+
+// browseId を持つ VC かどうかを判定するための前方宣言
+@interface YTInnerTubeCollectionViewController : UIViewController
+@end
+
 %hook YTInnerTubeCollectionViewController
-- (void)loadWithModel:(id)model {
-    id s = (id)self;
-    NSString *browseId = [s respondsToSelector:@selector(browseId)]
-        ? [s performSelector:@selector(browseId)] : @"(none)";
-    NSUInteger count = 0;
-    if ([model respondsToSelector:@selector(contentsArray)])
-        count = [[model performSelector:@selector(contentsArray)] count];
-    CFLog(@"[CF-Feed] loadWithModel: browseId=%@ items=%lu class=%@",
-          browseId, (unsigned long)count, NSStringFromClass([s class]));
-    %orig;
-}
-
-- (void)displaySectionsWithReloadingSectionControllerByRenderer:(id)renderer {
-    id s = (id)self;
-    NSMutableArray *secs = [s valueForKey:@"_sectionRenderers"];
-    CFLog(@"[CF-Feed] displaySections: _sectionRenderers count=%lu", (unsigned long)secs.count);
-    %orig;
-}
 
 - (void)addSectionsFromArray:(NSArray *)array {
-    CFLog(@"[CF-Feed] addSectionsFromArray: count=%lu", (unsigned long)array.count);
-
     CFWhitelistManager *wl = [CFWhitelistManager sharedManager];
-    BOOL shouldFilter = ![wl isEmpty];
 
-    // Gemini提案: elementData(_NSInlineData)のバイナリから
-    //             "UC" + 22文字 のchannelIdを正規表現で抽出してフィルタ
-    NSRegularExpression *regex = [NSRegularExpression
-        regularExpressionWithPattern:@"UC[A-Za-z0-9_-]{22}"
-        options:0 error:nil];
+    // このVCが登録チャンネルタブかどうかを判定
+    // browseId プロパティは存在しないため、クラス名で判定
+    id s = (id)self;
+    NSString *vcClass = NSStringFromClass([s class]);
+    BOOL isSubscriptionFeed =
+        [vcClass isEqualToString:@"YTBrowseViewController"] ||
+        [vcClass isEqualToString:@"YTBrowseResponseViewController"];
 
+    BOOL shouldFilter = !isSubscriptionFeed && ![wl isEmpty];
+
+    NSMutableArray *channelIdsForSync = isSubscriptionFeed
+        ? [NSMutableArray array] : nil;
     NSMutableIndexSet *sectionsToRemove = [NSMutableIndexSet indexSet];
 
     for (NSUInteger si = 0; si < array.count; si++) {
         id section = array[si];
+
+        // フィルターチップバーはスキップ
         NSString *secClass = NSStringFromClass([section class]);
-        if ([secClass containsString:@"FilterChip"] || [secClass containsString:@"ChipBar"]) continue;
+        if ([secClass containsString:@"FilterChip"] ||
+            [secClass containsString:@"ChipBar"]) continue;
+
         if (![section respondsToSelector:@selector(contentsArray)]) continue;
         #pragma clang diagnostic push
         #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
@@ -286,283 +166,71 @@ static void cf_injectBtn(UIWindow *w) {
             #pragma clang diagnostic pop
             if (!elemData || ![elemData isKindOfClass:[NSData class]]) continue;
 
-            // バイナリをUTF-8文字列として読み込みchannelIdを抽出
-            NSString *raw = [[NSString alloc] initWithData:(NSData *)elemData
-                                                  encoding:NSISOLatin1StringEncoding];
-            if (!raw) continue;
+            // バイナリから channelId を抽出
+            NSString *channelId = cf_extractChannelId((NSData *)elemData);
+            if (!channelId.length) continue;
 
-            NSArray *matches = [regex matchesInString:raw
-                                              options:0
-                                                range:NSMakeRange(0, raw.length)];
-            if (!matches.count) {
-                CFLog(@"[CF-Filter] no channelId found in elementData");
-                continue;
-            }
-
-            // 最初にマッチしたchannelIdで判定
-            NSTextCheckingResult *match = matches[0];
-            NSString *channelId = [raw substringWithRange:match.range];
-            CFLog(@"[CF-Filter] channelId=%@", channelId);
-
-            if (shouldFilter && ![wl isChannelAllowed:channelId]) {
+            if (isSubscriptionFeed) {
+                // 登録チャンネルタブ: channelId を収集してホワイトリストに同期
+                [channelIdsForSync addObject:channelId];
+            } else if (shouldFilter && ![wl isChannelAllowed:channelId]) {
+                // フィルター対象: 除去リストに追加
                 [itemsToRemove addIndex:ii];
-                CFLog(@"[CF-Filter] ❌ removed channelId=%@", channelId);
-            } else {
-                CFLog(@"[CF-Filter] ✅ allowed channelId=%@", channelId);
             }
         }
 
+        // アイテムを除去
         if (itemsToRemove.count > 0) {
             NSMutableArray *mutableItems = [items mutableCopy];
             [mutableItems removeObjectsAtIndexes:itemsToRemove];
-            // contentsArrayを書き換える
             if ([section respondsToSelector:@selector(setContentsArray:)]) {
                 #pragma clang diagnostic push
                 #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                [section performSelector:@selector(setContentsArray:) withObject:mutableItems];
+                [section performSelector:@selector(setContentsArray:)
+                             withObject:mutableItems];
                 #pragma clang diagnostic pop
             }
             if (mutableItems.count == 0) [sectionsToRemove addIndex:si];
         }
     }
 
-    // セクション全体が空になったものは除去
+    // 空になったセクションを除去して %orig を呼ぶ
     if (sectionsToRemove.count > 0) {
         NSMutableArray *mutableArray = [array mutableCopy];
         [mutableArray removeObjectsAtIndexes:sectionsToRemove];
         %orig(mutableArray);
-        return;
+    } else {
+        %orig;
     }
-    %orig;
+
+    // ホワイトリスト同期（登録チャンネルタブのみ）
+    if (isSubscriptionFeed && channelIdsForSync.count > 0) {
+        [wl syncSubscribedChannelIDs:channelIdsForSync];
+    }
 }
+
 %end
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 調査②: ASCollectionView.nodeForItemAtIndexPath:
-//   - 呼ばれているか / renderer に channelId があるか
-//   ※ 既存フックが uYouPlus.xm にあるが、そちらは %hook で追加なので
-//     ここでも同じクラスを %hook できる（Logosは同クラスの複数フックを許容）
+// 機能2: アカウント追加ブロック
 // ─────────────────────────────────────────────────────────────────────────────
-%hook ASCollectionView
-- (id)nodeForItemAtIndexPath:(NSIndexPath *)ip {
-    id node = %orig;
-    static BOOL _elmInspected = NO;
-    if (!_elmInspected) {
-        // ASWrapperCellNode -> sectionController -> ELMNodeController を探す
-        // nodeControllerForNode: / _nodeController / nodeController 等を試す
-        NSArray *paths = @[@"nodeController", @"_nodeController",
-                           @"sectionController", @"_sectionController",
-                           @"controller", @"_controller"];
-        for (NSString *p in paths) {
-            SEL s = NSSelectorFromString(p);
-            if (![node respondsToSelector:s]) continue;
-            #pragma clang diagnostic push
-            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-            id ctrl = [node performSelector:s];
-            #pragma clang diagnostic pop
-            if (!ctrl) continue;
-            CFLog(@"[CF-ELM] node.%@ = %@", p, NSStringFromClass([ctrl class]));
-
-            // ctrl のメソッド名のみ列挙
-            unsigned int cnt = 0;
-            Method *methods = class_copyMethodList([ctrl class], &cnt);
-            for (unsigned int i = 0; i < cnt; i++) {
-                NSString *sel = NSStringFromSelector(method_getName(methods[i]));
-                if ([sel hasPrefix:@"set"] || [sel hasPrefix:@"_"] || sel.length > 80) continue;
-                CFLog(@"[CF-ELM]   ctrl.method: %@", sel);
-            }
-            free(methods);
-            _elmInspected = YES;
-            break;
-        }
-        if (!_elmInspected) {
-            // 全メソッドからcontroller/model/renderer関連を探す
-            unsigned int cnt = 0;
-            Method *methods = class_copyMethodList([node class], &cnt);
-            for (unsigned int i = 0; i < cnt; i++) {
-                NSString *sel = NSStringFromSelector(method_getName(methods[i]));
-                if ([sel hasPrefix:@"set"] || [sel hasPrefix:@"_"] || sel.length > 80) continue;
-                if ([sel containsString:@"ontroller"] || [sel containsString:@"odel"] ||
-                    [sel containsString:@"ender"] || [sel containsString:@"hannel"]) {
-                    CFLog(@"[CF-ELM] node.method: %@", sel);
-                }
-            }
-            free(methods);
-            _elmInspected = YES;
-        }
-    }
-    return node;
-}
-%end
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 調査③: UIImage imageNamed:inBundle:
-//   - ロゴ系の画像名でフックが呼ばれているか
-//   - バンドルファイルが存在するか
-// ─────────────────────────────────────────────────────────────────────────────
-%hook UIImage
-+ (UIImage *)imageNamed:(NSString *)name
-               inBundle:(NSBundle *)bundle
-compatibleWithTraitCollection:(UITraitCollection *)tc {
-
-    if ([name isEqualToString:@"youtube_logo_dark_cairo"] ||
-        [name isEqualToString:@"youtube_premium_logo_dark_cairo"]) {
-
-        // バンドルパスを取得
-        static NSString *darkPath;
-        static NSString *litePath;
-        static dispatch_once_t once;
-        dispatch_once(&once, ^{
-            NSString *bPath = [[NSBundle mainBundle] pathForResource:@"uYouPlus" ofType:@"bundle"];
-            NSBundle *b = bPath ? [NSBundle bundleWithPath:bPath] : nil;
-            darkPath = [b pathForResource:@"PremiumLogo_dark" ofType:@"png"];
-            litePath = [b pathForResource:@"PremiumLogo_lite" ofType:@"png"];
-            // バンドル内の全pngファイルをログ出力
-            CFLog(@"[CF-Logo-DEBUG] bPath=%@", bPath ?: @"NIL");
-            NSArray *pngs = [[NSFileManager defaultManager]
-                contentsOfDirectoryAtPath:bPath error:nil];
-            for (NSString *f in pngs) {
-                if ([f hasSuffix:@".png"] || [f containsString:@"Logo"])
-                    CFLog(@"[CF-Logo-DEBUG] file: %@", f);
-            }
-            CFLog(@"[CF-Logo-DEBUG] darkPath=%@", darkPath ?: @"NIL");
-            CFLog(@"[CF-Logo-DEBUG] litePath=%@", litePath ?: @"NIL");
-        });
-
-        // ダークモード判定
-        BOOL isDark = (tc.userInterfaceStyle == UIUserInterfaceStyleDark)
-            || ([name containsString:@"dark"]);
-        NSString *path = isDark ? darkPath : litePath;
-        if (path) {
-            UIImage *logo = [UIImage imageWithContentsOfFile:path];
-            if (logo) {
-                CFLog(@"[CF-Logo] ✅ replaced '%@' -> %@", name, isDark ? @"dark" : @"lite");
-                return logo;
-            } else {
-                CFLog(@"[CF-Logo] ❌ imageWithContentsOfFile failed: %@", path);
-            }
-        } else {
-            CFLog(@"[CF-Logo] ❌ path not found for %@", name);
-        }
-    }
-
-    // ログ（未置き換えのロゴ系）
-    if ([name containsString:@"logo"] || [name containsString:@"Logo"] ||
-        [name containsString:@"premium"] || [name containsString:@"Premium"]) {
-        static NSMutableSet *_seen;
-        if (!_seen) _seen = [NSMutableSet set];
-        if (![_seen containsObject:name]) {
-            [_seen addObject:name];
-            CFLog(@"[CF-Logo] imageNamed: '%@' bundle=%@", name, [bundle.bundlePath lastPathComponent]);
-        }
-    }
-    return %orig;
-}
-
-+ (UIImage *)imageNamed:(NSString *)name {
-    if ([name isEqualToString:@"youtube_logo_dark_cairo"] ||
-        [name isEqualToString:@"youtube_premium_logo_dark_cairo"]) {
-        static NSString *darkPath2;
-        static NSString *litePath2;
-        static dispatch_once_t once2;
-        dispatch_once(&once2, ^{
-            NSString *bPath = [[NSBundle mainBundle] pathForResource:@"uYouPlus" ofType:@"bundle"];
-            NSBundle *b = bPath ? [NSBundle bundleWithPath:bPath] : nil;
-            darkPath2 = [b pathForResource:@"PremiumLogo_dark" ofType:@"png"];
-            litePath2 = [b pathForResource:@"PremiumLogo_lite" ofType:@"png"];
-        });
-        NSString *path = darkPath2; // バンドルなし版はダーク固定
-        if (path) {
-            UIImage *logo = [UIImage imageWithContentsOfFile:path];
-            if (logo) {
-                CFLog(@"[CF-Logo] ✅ replaced(no-bundle) '%@'", name);
-                return logo;
-            }
-        }
-    }
-    return %orig;
-}
-%end
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 調査④: YTHeaderLogoControllerImpl
-//   - setTopbarLogoRenderer: が呼ばれているか（uYouPlus.xm の gSTARDYLogo と同じクラス）
-// ─────────────────────────────────────────────────────────────────────────────
-%hook YTHeaderLogoControllerImpl
-- (void)setTopbarLogoRenderer:(id)renderer {
-    CFLog(@"[CF-Logo] setTopbarLogoRenderer: called. renderer=%@", NSStringFromClass([renderer class]));
-    %orig;
-}
-%end
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Gemini提案②: YTColdConfig のelement系フラグを調査
-// element_home_feed / isElementxxxEnabled 系のメソッドを列挙してログ出力
-// ─────────────────────────────────────────────────────────────────────────────
-%hook YTColdConfig
-+ (id)sharedInstance {
-    id instance = %orig;
-    static BOOL _dumped = NO;
-    if (!_dumped && instance) {
-        _dumped = YES;
-        unsigned int cnt = 0;
-        Method *methods = class_copyMethodList([instance class], &cnt);
-        for (unsigned int i = 0; i < cnt; i++) {
-            NSString *sel = NSStringFromSelector(method_getName(methods[i]));
-            // element / feed / home 関連のフラグのみ
-            if ([sel containsString:@"lement"] || [sel containsString:@"homeFeed"] ||
-                [sel containsString:@"home_feed"] || [sel containsString:@"ElementEnabled"]) {
-                CFLog(@"[CF-Config] YTColdConfig method: %@", sel);
-            }
-        }
-        free(methods);
-    }
-    return instance;
-}
-%end
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 既存機能: アカウント追加ブロック（変更なし）
-// ─────────────────────────────────────────────────────────────────────────────
-static void cf_showAlert(NSString *title, NSString *message) {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        UIAlertController *alert = [UIAlertController
-            alertControllerWithTitle:title message:message
-            preferredStyle:UIAlertControllerStyleAlert];
-        [alert addAction:[UIAlertAction actionWithTitle:@"OK"
-            style:UIAlertActionStyleDefault handler:nil]];
-        UIWindow *w = nil;
-        if (@available(iOS 15, *))
-            for (UIScene *sc in [UIApplication sharedApplication].connectedScenes)
-                if ([sc isKindOfClass:[UIWindowScene class]])
-                    for (UIWindow *win in ((UIWindowScene *)sc).windows)
-                        if (win.isKeyWindow) { w = win; break; }
-        if (!w) w = [UIApplication sharedApplication].keyWindow;
-        UIViewController *root = w.rootViewController;
-        while (root.presentedViewController) root = root.presentedViewController;
-        [root presentViewController:alert animated:YES completion:nil];
-    });
-}
-
-@interface YTInlineSignInViewController : UIViewController
-@end
 %hook YTInlineSignInViewController
 - (void)didTapShowAddAccount {
-    cf_showAlert(@"アカウント追加不可", @"このビルドでは複数アカウントの追加は許可されていません。");
+    cf_showAlert(@"アカウント追加不可",
+                 @"このビルドでは複数アカウントの追加は許可されていません。");
 }
 %end
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 既存機能: 登録ボタン非表示（変更なし）
+// 機能3: 登録ボタン非表示
 // ─────────────────────────────────────────────────────────────────────────────
-@interface YTQTMButton : UIButton
-@end
 %hook YTQTMButton
 - (void)setTitle:(NSString *)title forState:(UIControlState)state {
     %orig;
     NSString *t = [(UIButton *)self titleForState:UIControlStateNormal];
     if (t && ([t containsString:@"登録"] || [t isEqualToString:@"Subscribe"])) {
-        self.hidden = YES; self.alpha = 0;
+        self.hidden = YES;
+        self.alpha  = 0;
     }
 }
 - (void)willMoveToWindow:(UIWindow *)newWindow {
@@ -570,7 +238,71 @@ static void cf_showAlert(NSString *title, NSString *message) {
     if (!newWindow) return;
     NSString *t = [self titleForState:UIControlStateNormal];
     if (t && ([t containsString:@"登録"] || [t isEqualToString:@"Subscribe"])) {
-        self.hidden = YES; self.alpha = 0;
+        self.hidden = YES;
+        self.alpha  = 0;
     }
+}
+%end
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 機能4: STARDYロゴ置き換え
+//
+// CF Logで確認した画像名:
+//   ダーク: youtube_logo_dark_cairo / youtube_premium_logo_dark_cairo
+//   ライト: youtube_premium_badge_light / youtube_premium_standalone_cairo
+// ─────────────────────────────────────────────────────────────────────────────
+static UIImage *cf_stardyLogo(BOOL dark) {
+    static NSString *darkPath;
+    static NSString *litePath;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSString *bPath = [[NSBundle mainBundle]
+            pathForResource:@"uYouPlus" ofType:@"bundle"];
+        NSBundle *b = bPath ? [NSBundle bundleWithPath:bPath] : nil;
+        darkPath = [b pathForResource:@"PremiumLogo_dark" ofType:@"png"];
+        litePath = [b pathForResource:@"PremiumLogo_lite" ofType:@"png"];
+    });
+    NSString *path = dark ? darkPath : litePath;
+    if (!path) return nil;
+    return [UIImage imageWithContentsOfFile:path];
+}
+
+static BOOL cf_isDarkLogoName(NSString *name) {
+    return [name isEqualToString:@"youtube_logo_dark_cairo"] ||
+           [name isEqualToString:@"youtube_premium_logo_dark_cairo"];
+}
+
+static BOOL cf_isLiteLogoName(NSString *name) {
+    return [name isEqualToString:@"youtube_premium_badge_light"] ||
+           [name isEqualToString:@"youtube_premium_standalone_cairo"];
+}
+
+%hook UIImage
++ (UIImage *)imageNamed:(NSString *)name
+               inBundle:(NSBundle *)bundle
+compatibleWithTraitCollection:(UITraitCollection *)tc {
+    if (name.length > 0) {
+        if (cf_isDarkLogoName(name)) {
+            UIImage *logo = cf_stardyLogo(YES);
+            if (logo) return logo;
+        } else if (cf_isLiteLogoName(name)) {
+            UIImage *logo = cf_stardyLogo(NO);
+            if (logo) return logo;
+        }
+    }
+    return %orig;
+}
+
++ (UIImage *)imageNamed:(NSString *)name {
+    if (name.length > 0) {
+        if (cf_isDarkLogoName(name)) {
+            UIImage *logo = cf_stardyLogo(YES);
+            if (logo) return logo;
+        } else if (cf_isLiteLogoName(name)) {
+            UIImage *logo = cf_stardyLogo(NO);
+            if (logo) return logo;
+        }
+    }
+    return %orig;
 }
 %end
