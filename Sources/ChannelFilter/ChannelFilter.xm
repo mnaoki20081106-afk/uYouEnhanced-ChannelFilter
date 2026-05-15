@@ -160,10 +160,25 @@ static NSString *cf_extractChannelId(NSData *data) {
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
     NSString *name = NSStringFromClass([(id)self class]);
+    // 登録チャンネルタブの判定:
+    // YTBrowseResponseViewControllerはホームと登録両方に出るが、
+    // YTFeedFilterChipBarViewControllerのviewDidAppearが登録タブ開時に
+    // 「登録チャンネル」のtitleを持つQTMButtonの後に出ることに注目。
+    // シンプルな方法: cf_is_subscription_tabフラグはQTMButtonのタイトルで立てる
     if ([name containsString:@"Browse"] || [name containsString:@"Subscri"] ||
         [name containsString:@"Library"] || [name containsString:@"Feed"]) {
         static NSMutableSet *_s; if (!_s) _s=[NSMutableSet set];
         if (![_s containsObject:name]) { [_s addObject:name]; CFLog(@"[VC] %@", name); }
+    }
+    // 登録チャンネルタブかどうかをタイトルで判定
+    if ([name isEqualToString:@"YTBrowseResponseViewController"]) {
+        UIViewController *vcSelf = (UIViewController *)self;
+        NSString *vcTitle = vcSelf.title;
+        CFLog(@"[Tab] YTBrowseResponseVC title='%@'", vcTitle ?: @"nil");
+        BOOL isSub = [vcTitle containsString:@"登録"] || [vcTitle containsString:@"Subscri"];
+        [[NSUserDefaults standardUserDefaults] setBool:isSub forKey:@"cf_is_subscription_tab"];
+        [[NSUserDefaults standardUserDefaults] synchronize];
+        CFLog(@"[Tab] cf_is_subscription_tab = %d", (int)isSub);
     }
 }
 %end
@@ -178,14 +193,14 @@ static NSString *cf_extractChannelId(NSData *data) {
     NSString *vcClass = NSStringFromClass([s class]);
     CFWhitelistManager *wl = [CFWhitelistManager sharedManager];
 
-    // 登録チャンネルタブ判定（ログで確認しながら調整）
-    BOOL isSubscriptionFeed =
-        [vcClass isEqualToString:@"YTBrowseViewController"] ||
-        [vcClass isEqualToString:@"YTBrowseResponseViewController"];
+    // 登録チャンネルタブの判定:
+    // NSUserDefaultsにYTBrowseResponseViewControllerのviewDidAppearでフラグを立てる方式
+    BOOL isSubscriptionFeed = [[NSUserDefaults standardUserDefaults]
+        boolForKey:@"cf_is_subscription_tab"];
 
     BOOL shouldFilter = !isSubscriptionFeed && ![wl isEmpty];
 
-    CFLog(@"[Feed] addSections vcClass=%@ count=%lu isSub=%d shouldFilter=%d wlEmpty=%d",
+    CFLog(@"[Feed] vcClass=%@ count=%lu isSub=%d shouldFilter=%d wlEmpty=%d",
           vcClass, (unsigned long)array.count, (int)isSubscriptionFeed,
           (int)shouldFilter, (int)[wl isEmpty]);
 
@@ -223,10 +238,10 @@ static NSString *cf_extractChannelId(NSData *data) {
 
             if (isSubscriptionFeed) {
                 [channelIdsForSync addObject:channelId];
-                CFLog(@"[Sync] collected channelId=%@", channelId);
+                CFLog(@"[Sync] collected %@", channelId);
             } else if (shouldFilter) {
                 BOOL allowed = [wl isChannelAllowed:channelId];
-                CFLog(@"[Filter] channelId=%@ allowed=%d", channelId, (int)allowed);
+                CFLog(@"[Filter] %@ allowed=%d", channelId, (int)allowed);
                 if (!allowed) [itemsToRemove addIndex:ii];
             }
         }
@@ -251,7 +266,7 @@ static NSString *cf_extractChannelId(NSData *data) {
     }
     if (isSubscriptionFeed && channelIdsForSync.count > 0) {
         [wl syncSubscribedChannelIDs:channelIdsForSync];
-        CFLog(@"[Sync] synced %lu channelIds", (unsigned long)channelIdsForSync.count);
+        CFLog(@"[Sync] ✅ synced %lu channelIds to whitelist", (unsigned long)channelIdsForSync.count);
     }
 }
 %end
@@ -284,23 +299,58 @@ static void cf_showAlert(NSString *title, NSString *msg) {
 // ─── 登録ボタン非表示 ────────────────────────────────────────────────────────
 @interface YTQTMButton : UIButton
 @end
+// タブバーのボタン名（非表示にしてはいけないもの）
+static NSSet *cf_tabBarTitles(void) {
+    static NSSet *s; static dispatch_once_t t;
+    dispatch_once(&t, ^{
+        s = [NSSet setWithObjects:@"ホーム",@"ショート",@"登録チャンネル",@"マイページ",@"uYou",
+             @"Home",@"Shorts",@"Subscriptions",@"You",@"Library",nil];
+    });
+    return s;
+}
+
 %hook YTQTMButton
 - (void)setTitle:(NSString *)title forState:(UIControlState)state {
     %orig;
     NSString *t = [(UIButton *)self titleForState:UIControlStateNormal];
-    CFLog(@"[SubBtn] YTQTMButton title='%@'", t ?: @"nil");
-    if (t && ([t containsString:@"登録"] || [t containsString:@"Subscribe"]
-              || [t containsString:@"subscribe"])) {
-        self.hidden = YES; self.alpha = 0;
+    CFLog(@"[SubBtn] title='%@'", t ?: @"nil");
+    // タブバーのボタンは除外、それ以外のYTQTMButtonを非表示
+    if (t.length > 0 && ![cf_tabBarTitles() containsObject:t] &&
+        ![[NSUserDefaults standardUserDefaults] boolForKey:@"cf_is_subscription_tab"]) {
+        // チャンネル名が入っているボタン = 登録ボタン
+        // タブバーにないタイトルのQTMButtonを非表示
+        // ただし「フィードバックを送信」等のUIも除外が必要
+        // → ここではチャンネルページ上のQTMButtonのみを狙うため
+        //   viewControllerのクラスで判定
+        UIViewController *vc = nil;
+        UIResponder *r = self;
+        while ((r = r.nextResponder)) {
+            if ([r isKindOfClass:[UIViewController class]]) { vc=(UIViewController *)r; break; }
+        }
+        NSString *vcName = NSStringFromClass([vc class]);
+        CFLog(@"[SubBtn] parentVC=%@", vcName);
+        if ([vcName containsString:@"Channel"] || [vcName containsString:@"Browse"] ||
+            [vcName containsString:@"Profile"]) {
+            self.hidden = YES; self.alpha = 0;
+            CFLog(@"[SubBtn] ✅ hidden button on %@", vcName);
+        }
     }
 }
 - (void)willMoveToWindow:(UIWindow *)newWindow {
     %orig;
     if (!newWindow) return;
     NSString *t = [self titleForState:UIControlStateNormal];
-    if (t && ([t containsString:@"登録"] || [t containsString:@"Subscribe"]
-              || [t containsString:@"subscribe"])) {
-        self.hidden = YES; self.alpha = 0;
+    if (t.length > 0 && ![cf_tabBarTitles() containsObject:t]) {
+        UIResponder *r = self;
+        UIViewController *vc = nil;
+        while ((r = r.nextResponder)) {
+            if ([r isKindOfClass:[UIViewController class]]) { vc=(UIViewController *)r; break; }
+        }
+        NSString *vcName = NSStringFromClass([vc class]);
+        if ([vcName containsString:@"Channel"] || [vcName containsString:@"Browse"] ||
+            [vcName containsString:@"Profile"]) {
+            self.hidden = YES; self.alpha = 0;
+        }
     }
 }
 %end
