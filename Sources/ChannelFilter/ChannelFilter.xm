@@ -177,6 +177,24 @@ static void cf_injectBtn(UIWindow *w) {
 }
 %end
 
+// ─── 登録チャンネルタブのVC特定 ──────────────────────────────────────────────
+// Subscriptions / Feed / Browse / Library 系のVCが出たらメソッド一覧を出す
+%hook UIViewController
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    NSString *name = NSStringFromClass([(id)self class]);
+    if ([name containsString:@"Subscri"] || [name containsString:@"Library"] ||
+        [name containsString:@"Browse"] || [name containsString:@"Channels"]) {
+        static NSMutableSet *_seen;
+        if (!_seen) _seen = [NSMutableSet set];
+        if (![_seen containsObject:name]) {
+            [_seen addObject:name];
+            CFLog(@"[CF-VC] appeared: %@", name);
+        }
+    }
+}
+%end
+
 // ─── YTAppDelegate: 起動時に注入 ─────────────────────────────────────────────
 %hook YTAppDelegate
 - (void)applicationDidBecomeActive:(UIApplication *)app {
@@ -225,91 +243,95 @@ static void cf_injectBtn(UIWindow *w) {
 - (void)addSectionsFromArray:(NSArray *)array {
     CFLog(@"[CF-Feed] addSectionsFromArray: count=%lu", (unsigned long)array.count);
 
-    // 動画アイテム（ghostCard以外）が来るまで毎回調べる
-    static BOOL _foundVideo = NO;
-    if (!_foundVideo) {
-        for (NSUInteger si = 0; si < array.count; si++) {
-            id section = array[si];
-            NSString *secClass = NSStringFromClass([section class]);
-            if ([secClass containsString:@"FilterChip"] || [secClass containsString:@"ChipBar"]) continue;
-            if (![section respondsToSelector:@selector(contentsArray)]) continue;
+    CFWhitelistManager *wl = [CFWhitelistManager sharedManager];
+    BOOL shouldFilter = ![wl isEmpty];
+
+    // Gemini提案: elementData(_NSInlineData)のバイナリから
+    //             "UC" + 22文字 のchannelIdを正規表現で抽出してフィルタ
+    NSRegularExpression *regex = [NSRegularExpression
+        regularExpressionWithPattern:@"UC[A-Za-z0-9_-]{22}"
+        options:0 error:nil];
+
+    NSMutableIndexSet *sectionsToRemove = [NSMutableIndexSet indexSet];
+
+    for (NSUInteger si = 0; si < array.count; si++) {
+        id section = array[si];
+        NSString *secClass = NSStringFromClass([section class]);
+        if ([secClass containsString:@"FilterChip"] || [secClass containsString:@"ChipBar"]) continue;
+        if (![section respondsToSelector:@selector(contentsArray)]) continue;
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        NSArray *items = [section performSelector:@selector(contentsArray)];
+        #pragma clang diagnostic pop
+        if (!items.count) continue;
+
+        NSMutableIndexSet *itemsToRemove = [NSMutableIndexSet indexSet];
+
+        for (NSUInteger ii = 0; ii < items.count; ii++) {
+            id item = items[ii];
+
+            // elementRenderer を取得
+            if (![item respondsToSelector:@selector(elementRenderer)]) continue;
             #pragma clang diagnostic push
             #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-            NSArray *items = [section performSelector:@selector(contentsArray)];
+            id elemRenderer = [item performSelector:@selector(elementRenderer)];
             #pragma clang diagnostic pop
-            if (!items.count) continue;
+            if (!elemRenderer) continue;
 
-            // 全アイテムを調べる（ghostCardをスキップ）
-            for (id item in items) {
-                // ghostCardだけのアイテムはスキップ
-                unsigned int cnt = 0;
-                Method *methods = class_copyMethodList([item class], &cnt);
-                NSMutableArray *getters = [NSMutableArray array];
-                for (unsigned int i = 0; i < cnt; i++) {
-                    NSString *sel = NSStringFromSelector(method_getName(methods[i]));
-                    if (![sel hasPrefix:@"set"] && ![sel hasPrefix:@"has"] &&
-                        ![sel hasPrefix:@"_"] && sel.length < 80) {
-                        [getters addObject:sel];
-                    }
-                }
-                free(methods);
+            // elementData を取得
+            if (![elemRenderer respondsToSelector:@selector(elementData)]) continue;
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            id elemData = [elemRenderer performSelector:@selector(elementData)];
+            #pragma clang diagnostic pop
+            if (!elemData || ![elemData isKindOfClass:[NSData class]]) continue;
 
-                // ghostCardしか持たないアイテムはスキップ
-                if (getters.count == 1 && [getters[0] isEqualToString:@"ghostCardRenderer"]) continue;
-                // elementRendererがないアイテムもスキップ
-                BOOL hasElement = NO;
-                for (NSString *g in getters) {
-                    if ([g isEqualToString:@"elementRenderer"]) { hasElement = YES; break; }
-                }
-                if (!hasElement) continue;
+            // バイナリをUTF-8文字列として読み込みchannelIdを抽出
+            NSString *raw = [[NSString alloc] initWithData:(NSData *)elemData
+                                                  encoding:NSISOLatin1StringEncoding];
+            if (!raw) continue;
 
-                CFLog(@"[CF-Feed2] ✅ found elementRenderer item");
+            NSArray *matches = [regex matchesInString:raw
+                                              options:0
+                                                range:NSMakeRange(0, raw.length)];
+            if (!matches.count) {
+                CFLog(@"[CF-Filter] no channelId found in elementData");
+                continue;
+            }
 
-                // elementRenderer を取得してクラス名とメソッド名だけ記録（呼び出しなし）
-                SEL elemSel = NSSelectorFromString(@"elementRenderer");
+            // 最初にマッチしたchannelIdで判定
+            NSTextCheckingResult *match = matches[0];
+            NSString *channelId = [raw substringWithRange:match.range];
+            CFLog(@"[CF-Filter] channelId=%@", channelId);
+
+            if (shouldFilter && ![wl isChannelAllowed:channelId]) {
+                [itemsToRemove addIndex:ii];
+                CFLog(@"[CF-Filter] ❌ removed channelId=%@", channelId);
+            } else {
+                CFLog(@"[CF-Filter] ✅ allowed channelId=%@", channelId);
+            }
+        }
+
+        if (itemsToRemove.count > 0) {
+            NSMutableArray *mutableItems = [items mutableCopy];
+            [mutableItems removeObjectsAtIndexes:itemsToRemove];
+            // contentsArrayを書き換える
+            if ([section respondsToSelector:@selector(setContentsArray:)]) {
                 #pragma clang diagnostic push
                 #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                id elemRenderer = [item performSelector:elemSel];
+                [section performSelector:@selector(setContentsArray:) withObject:mutableItems];
                 #pragma clang diagnostic pop
-                if (!elemRenderer) { CFLog(@"[CF-Feed2] elementRenderer is nil"); continue; }
-                CFLog(@"[CF-Feed2] elemRenderer class=%@", NSStringFromClass([elemRenderer class]));
-
-                // elementData を安全に取得してクラス名だけ記録
-                if ([elemRenderer respondsToSelector:@selector(elementData)]) {
-                    #pragma clang diagnostic push
-                    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                    id elemData = [elemRenderer performSelector:@selector(elementData)];
-                    #pragma clang diagnostic pop
-                    CFLog(@"[CF-Feed2] elementData class=%@", NSStringFromClass([elemData class]));
-
-                    // elementData のメソッド名のみ列挙（呼び出しなし）
-                    if (elemData) {
-                        unsigned int ecnt = 0;
-                        Method *emethods = class_copyMethodList([elemData class], &ecnt);
-                        for (unsigned int ei = 0; ei < ecnt; ei++) {
-                            NSString *esel = NSStringFromSelector(method_getName(emethods[ei]));
-                            if ([esel hasPrefix:@"set"] || [esel hasPrefix:@"_"] || esel.length > 80) continue;
-                            CFLog(@"[CF-Feed2]   data.method: %@", esel);
-                        }
-                        free(emethods);
-                    }
-                } else {
-                    CFLog(@"[CF-Feed2] elementData not found");
-                    // elementDataがない場合はtitleとtrackingParamsだけ記録
-                    if ([elemRenderer respondsToSelector:@selector(title)]) {
-                        #pragma clang diagnostic push
-                        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                        id title = [elemRenderer performSelector:@selector(title)];
-                        #pragma clang diagnostic pop
-                        CFLog(@"[CF-Feed2] title class=%@", NSStringFromClass([title class]));
-                    }
-                }
-                _foundVideo = YES;
-                break;
-
             }
-            if (_foundVideo) break;
+            if (mutableItems.count == 0) [sectionsToRemove addIndex:si];
         }
+    }
+
+    // セクション全体が空になったものは除去
+    if (sectionsToRemove.count > 0) {
+        NSMutableArray *mutableArray = [array mutableCopy];
+        [mutableArray removeObjectsAtIndexes:sectionsToRemove];
+        %orig(mutableArray);
+        return;
     }
     %orig;
 }
@@ -470,6 +492,32 @@ compatibleWithTraitCollection:(UITraitCollection *)tc {
 - (void)setTopbarLogoRenderer:(id)renderer {
     CFLog(@"[CF-Logo] setTopbarLogoRenderer: called. renderer=%@", NSStringFromClass([renderer class]));
     %orig;
+}
+%end
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Gemini提案②: YTColdConfig のelement系フラグを調査
+// element_home_feed / isElementxxxEnabled 系のメソッドを列挙してログ出力
+// ─────────────────────────────────────────────────────────────────────────────
+%hook YTColdConfig
++ (id)sharedInstance {
+    id instance = %orig;
+    static BOOL _dumped = NO;
+    if (!_dumped && instance) {
+        _dumped = YES;
+        unsigned int cnt = 0;
+        Method *methods = class_copyMethodList([instance class], &cnt);
+        for (unsigned int i = 0; i < cnt; i++) {
+            NSString *sel = NSStringFromSelector(method_getName(methods[i]));
+            // element / feed / home 関連のフラグのみ
+            if ([sel containsString:@"lement"] || [sel containsString:@"homeFeed"] ||
+                [sel containsString:@"home_feed"] || [sel containsString:@"ElementEnabled"]) {
+                CFLog(@"[CF-Config] YTColdConfig method: %@", sel);
+            }
+        }
+        free(methods);
+    }
+    return instance;
 }
 %end
 
