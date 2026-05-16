@@ -290,24 +290,82 @@ static void cf_showAlert(NSString *title, NSString *msg) {
 // ─── 登録ボタン非表示 ────────────────────────────────────────────────────────
 @interface YTQTMButton : UIButton
 @end
-// ─── YTPivotBarViewController: タブ切り替えを検出 ──────────────────────────
-// FEsubscriptions = 登録チャンネルタブの識別子
-%hook YTPivotBarViewController
-- (void)pivotBar:(id)pivotBar didSelectItem:(id)item {
-    NSString *identifier = nil;
-    if ([item respondsToSelector:@selector(pivotIdentifier)]) {
+// ─── Gemini提案: setNavigationEndpoint / setBrowseEndpoint をフック ──────────
+// YTBrowseViewController / YTAppCollectionViewController に渡される
+// NavigationEndpoint から browseId を取得して FEsubscriptions を判定
+%hook YTBrowseViewController
+- (void)setNavigationEndpoint:(id)endpoint {
+    %orig;
+    if (!endpoint) return;
+    // browseEndpoint から browseId を取得
+    id browseEP = nil;
+    if ([endpoint respondsToSelector:@selector(browseEndpoint)]) {
         #pragma clang diagnostic push
         #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-        identifier = [item performSelector:@selector(pivotIdentifier)];
+        browseEP = [endpoint performSelector:@selector(browseEndpoint)];
         #pragma clang diagnostic pop
     }
-    CFLog(@"[Tab] pivotBar didSelectItem identifier=%@", identifier ?: @"nil");
-
-    BOOL isSub = [identifier isEqualToString:@"FEsubscriptions"];
-    [[NSUserDefaults standardUserDefaults] setBool:isSub forKey:@"cf_is_subscription_tab"];
-    [[NSUserDefaults standardUserDefaults] synchronize];
-    CFLog(@"[Tab] cf_is_subscription_tab=%d", (int)isSub);
+    NSString *browseId = nil;
+    if ([browseEP respondsToSelector:@selector(browseId)]) {
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        browseId = [browseEP performSelector:@selector(browseId)];
+        #pragma clang diagnostic pop
+    }
+    CFLog(@"[Endpoint] YTBrowseVC setNavigationEndpoint browseId=%@", browseId ?: @"nil");
+    if (browseId.length > 0) {
+        BOOL isSub = [browseId isEqualToString:@"FEsubscriptions"];
+        [[NSUserDefaults standardUserDefaults] setBool:isSub forKey:@"cf_is_subscription_tab"];
+        [[NSUserDefaults standardUserDefaults] synchronize];
+        CFLog(@"[Endpoint] cf_is_subscription_tab=%d", (int)isSub);
+    }
+}
+// setBrowseEndpoint: も試す
+- (void)setBrowseEndpoint:(id)endpoint {
     %orig;
+    if (!endpoint) return;
+    NSString *browseId = nil;
+    if ([endpoint respondsToSelector:@selector(browseId)]) {
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        browseId = [endpoint performSelector:@selector(browseId)];
+        #pragma clang diagnostic pop
+    }
+    CFLog(@"[Endpoint] YTBrowseVC setBrowseEndpoint browseId=%@", browseId ?: @"nil");
+    if ([browseId isEqualToString:@"FEsubscriptions"]) {
+        [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"cf_is_subscription_tab"];
+        [[NSUserDefaults standardUserDefaults] synchronize];
+        CFLog(@"[Endpoint] ✅ FEsubscriptions detected");
+    }
+}
+%end
+
+// YTAppCollectionViewControllerにも同じフックを適用
+%hook YTAppCollectionViewController
+- (void)setNavigationEndpoint:(id)endpoint {
+    %orig;
+    if (!endpoint) return;
+    id browseEP = nil;
+    if ([endpoint respondsToSelector:@selector(browseEndpoint)]) {
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        browseEP = [endpoint performSelector:@selector(browseEndpoint)];
+        #pragma clang diagnostic pop
+    }
+    NSString *browseId = nil;
+    if ([browseEP respondsToSelector:@selector(browseId)]) {
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        browseId = [browseEP performSelector:@selector(browseId)];
+        #pragma clang diagnostic pop
+    }
+    CFLog(@"[Endpoint] YTAppCollectionVC setNavigationEndpoint browseId=%@", browseId ?: @"nil");
+    if (browseId.length > 0) {
+        BOOL isSub = [browseId isEqualToString:@"FEsubscriptions"];
+        [[NSUserDefaults standardUserDefaults] setBool:isSub forKey:@"cf_is_subscription_tab"];
+        [[NSUserDefaults standardUserDefaults] synchronize];
+        CFLog(@"[Endpoint] cf_is_subscription_tab=%d", (int)isSub);
+    }
 }
 %end
 
@@ -329,7 +387,8 @@ static void cf_showAlert(NSString *title, NSString *msg) {
         if ([r isKindOfClass:[UIViewController class]]) { vc=(UIViewController *)r; break; }
     }
     NSString *vcName = NSStringFromClass([vc class]);
-    CFLog(@"[SubBtn] title='%@' parentVC=%@", t, vcName);
+    NSString *accId = self.accessibilityIdentifier ?: @"nil";
+    CFLog(@"[SubBtn] title='%@' accId='%@' parentVC=%@", t, accId, vcName);
     if ([vcName containsString:@"Channel"] || [vcName containsString:@"Browse"] ||
         [vcName containsString:@"Profile"] || [vcName containsString:@"Watch"]) {
         self.hidden = YES; self.alpha = 0;
