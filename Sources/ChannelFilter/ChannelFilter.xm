@@ -290,61 +290,52 @@ static void cf_showAlert(NSString *title, NSString *msg) {
 // ─── 登録ボタン非表示 ────────────────────────────────────────────────────────
 @interface YTQTMButton : UIButton
 @end
+// ─── YTPivotBarViewController: タブ切り替えを検出 ──────────────────────────
+// FEsubscriptions = 登録チャンネルタブの識別子
+%hook YTPivotBarViewController
+- (void)pivotBar:(id)pivotBar didSelectItem:(id)item {
+    NSString *identifier = nil;
+    if ([item respondsToSelector:@selector(pivotIdentifier)]) {
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        identifier = [item performSelector:@selector(pivotIdentifier)];
+        #pragma clang diagnostic pop
+    }
+    CFLog(@"[Tab] pivotBar didSelectItem identifier=%@", identifier ?: @"nil");
+
+    BOOL isSub = [identifier isEqualToString:@"FEsubscriptions"];
+    [[NSUserDefaults standardUserDefaults] setBool:isSub forKey:@"cf_is_subscription_tab"];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+    CFLog(@"[Tab] cf_is_subscription_tab=%d", (int)isSub);
+    %orig;
+}
+%end
+
 %hook YTQTMButton
 - (void)setTitle:(NSString *)title forState:(UIControlState)state {
     %orig;
     NSString *t = [(UIButton *)self titleForState:UIControlStateNormal];
+    if (!t.length) return;
 
-    // タブバーの「登録チャンネル」ボタンを検出してタップハンドラを追加
-    if ([t isEqualToString:@"登録チャンネル"] || [t isEqualToString:@"Subscriptions"]) {
-        // 既にタップハンドラが追加されているか確認
-        NSNumber *tagged = objc_getAssociatedObject(self, "cf_subTabBtn");
-        if (!tagged) {
-            objc_setAssociatedObject(self, "cf_subTabBtn", @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            [self addTarget:self action:@selector(cf_subTabTapped) forControlEvents:UIControlEventTouchUpInside];
-            CFLog(@"[Tab] Subscription tab button detected, handler added");
-        }
-        return; // タブバーボタンなので非表示にしない
-    }
-
-    // タブバーの他のボタンも非表示にしない
-    NSArray *tabTitles = @[@"ホーム",@"ショート",@"マイページ",@"uYou",@"YouTube",
-                           @"Home",@"Shorts",@"You",@"Library",@"フィードバックを送信"];
+    // タブバーボタンは除外
+    NSArray *tabTitles = @[@"ホーム",@"ショート",@"登録チャンネル",@"マイページ",@"uYou",@"YouTube",
+                           @"Home",@"Shorts",@"Subscriptions",@"You",@"Library",@"フィードバックを送信"];
     if ([tabTitles containsObject:t]) return;
 
-    // タブバー以外のYTQTMButton = チャンネルページの登録ボタン
-    // 親VCで確認
+    // 親VCで判定
     UIViewController *vc = nil;
     UIResponder *r = self;
     while ((r = r.nextResponder)) {
         if ([r isKindOfClass:[UIViewController class]]) { vc=(UIViewController *)r; break; }
     }
     NSString *vcName = NSStringFromClass([vc class]);
-    CFLog(@"[SubBtn] title='%@' parentVC=%@", t ?: @"nil", vcName);
-    // Browse/Channel/Profile系のVCにある場合は登録ボタン
+    CFLog(@"[SubBtn] title='%@' parentVC=%@", t, vcName);
     if ([vcName containsString:@"Channel"] || [vcName containsString:@"Browse"] ||
         [vcName containsString:@"Profile"] || [vcName containsString:@"Watch"]) {
         self.hidden = YES; self.alpha = 0;
         CFLog(@"[SubBtn] ✅ hidden");
     }
 }
-
-%new
-- (void)cf_subTabTapped {
-    // 登録チャンネルタブがタップされた
-    [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"cf_is_subscription_tab"];
-    [[NSUserDefaults standardUserDefaults] synchronize];
-    CFLog(@"[Tab] ✅ Subscription tab tapped -> flag=YES");
-    // 他のタブのボタンがタップされたらフラグをクリアするために
-    // 少し後にフラグをリセット（同期完了後）
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        [[NSUserDefaults standardUserDefaults] setBool:NO forKey:@"cf_is_subscription_tab"];
-        [[NSUserDefaults standardUserDefaults] synchronize];
-        CFLog(@"[Tab] Subscription flag auto-cleared after 3s");
-    });
-}
-
 - (void)willMoveToWindow:(UIWindow *)newWindow {
     %orig;
     if (!newWindow) return;
