@@ -225,7 +225,39 @@ static NSString *cf_extractChannelId(NSData *data) {
             #pragma clang diagnostic pop
             if (!elemData || ![elemData isKindOfClass:[NSData class]]) continue;
             NSString *channelId = cf_extractChannelId((NSData *)elemData);
-            if (!channelId.length) continue;
+            if (!channelId.length) {
+                // channelIdが取れないアイテム（ショート等）の調査
+                static NSMutableSet *_shortLog; if (!_shortLog) _shortLog=[NSMutableSet set];
+                NSString *key = [NSString stringWithFormat:@"%lu-%lu", (unsigned long)si, (unsigned long)ii];
+                if (![_shortLog containsObject:key]) {
+                    [_shortLog addObject:key];
+                    // elementDataのサイズとtitleを確認
+                    NSUInteger dataLen = [(NSData *)elemData length];
+                    NSString *rawStr = [[NSString alloc] initWithData:(NSData *)elemData
+                                                             encoding:NSISOLatin1StringEncoding];
+                    // "Reel"や"Short"や"reels"が含まれるか確認
+                    BOOL isShort = rawStr && ([rawStr containsString:@"Reel"] ||
+                                              [rawStr containsString:@"reel"] ||
+                                              [rawStr containsString:@"Short"] ||
+                                              [rawStr containsString:@"short"]);
+                    CFLog(@"[Short?] si=%lu ii=%lu dataLen=%lu isShort=%d",
+                          (unsigned long)si, (unsigned long)ii, (unsigned long)dataLen, (int)isShort);
+                    // UU (チャンネルID代替?) や別パターンを探す
+                    // YouTubeのショートはUCの代わりに別の形式の可能性
+                    NSRegularExpression *r2 = [NSRegularExpression
+                        regularExpressionWithPattern:@"[A-Za-z]{2}[A-Za-z0-9_-]{22}"
+                        options:0 error:nil];
+                    NSArray *matches = [r2 matchesInString:rawStr?:@"" options:0
+                                                     range:NSMakeRange(0, rawStr.length)];
+                    for (NSTextCheckingResult *m in matches) {
+                        NSString *candidate = [rawStr substringWithRange:m.range];
+                        if (![candidate hasPrefix:@"UC"]) { // UC以外のIDパターン
+                            CFLog(@"[Short?]   non-UC id candidate: %@", candidate);
+                        }
+                    }
+                }
+                continue;
+            }
 
             if (isSubscriptionFeed) {
                 [channelIdsForSync addObject:channelId];
@@ -290,61 +322,111 @@ static void cf_showAlert(NSString *title, NSString *msg) {
 // ─── 登録ボタン非表示 ────────────────────────────────────────────────────────
 @interface YTQTMButton : UIButton
 @end
+// ─── Gemini提案: setNavigationEndpoint / setBrowseEndpoint をフック ──────────
+// YTBrowseViewController / YTAppCollectionViewController に渡される
+// NavigationEndpoint から browseId を取得して FEsubscriptions を判定
+%hook YTBrowseViewController
+- (void)setNavigationEndpoint:(id)endpoint {
+    %orig;
+    if (!endpoint) return;
+    // browseEndpoint から browseId を取得
+    id browseEP = nil;
+    if ([endpoint respondsToSelector:@selector(browseEndpoint)]) {
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        browseEP = [endpoint performSelector:@selector(browseEndpoint)];
+        #pragma clang diagnostic pop
+    }
+    NSString *browseId = nil;
+    if ([browseEP respondsToSelector:@selector(browseId)]) {
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        browseId = [browseEP performSelector:@selector(browseId)];
+        #pragma clang diagnostic pop
+    }
+    CFLog(@"[Endpoint] YTBrowseVC setNavigationEndpoint browseId=%@", browseId ?: @"nil");
+    if (browseId.length > 0) {
+        BOOL isSub = [browseId isEqualToString:@"FEsubscriptions"];
+        [[NSUserDefaults standardUserDefaults] setBool:isSub forKey:@"cf_is_subscription_tab"];
+        [[NSUserDefaults standardUserDefaults] synchronize];
+        CFLog(@"[Endpoint] cf_is_subscription_tab=%d", (int)isSub);
+    }
+}
+// setBrowseEndpoint: も試す
+- (void)setBrowseEndpoint:(id)endpoint {
+    %orig;
+    if (!endpoint) return;
+    NSString *browseId = nil;
+    if ([endpoint respondsToSelector:@selector(browseId)]) {
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        browseId = [endpoint performSelector:@selector(browseId)];
+        #pragma clang diagnostic pop
+    }
+    CFLog(@"[Endpoint] YTBrowseVC setBrowseEndpoint browseId=%@", browseId ?: @"nil");
+    if ([browseId isEqualToString:@"FEsubscriptions"]) {
+        [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"cf_is_subscription_tab"];
+        [[NSUserDefaults standardUserDefaults] synchronize];
+        CFLog(@"[Endpoint] ✅ FEsubscriptions detected");
+    }
+}
+%end
+
+// YTAppCollectionViewControllerにも同じフックを適用
+%hook YTAppCollectionViewController
+- (void)setNavigationEndpoint:(id)endpoint {
+    %orig;
+    if (!endpoint) return;
+    id browseEP = nil;
+    if ([endpoint respondsToSelector:@selector(browseEndpoint)]) {
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        browseEP = [endpoint performSelector:@selector(browseEndpoint)];
+        #pragma clang diagnostic pop
+    }
+    NSString *browseId = nil;
+    if ([browseEP respondsToSelector:@selector(browseId)]) {
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        browseId = [browseEP performSelector:@selector(browseId)];
+        #pragma clang diagnostic pop
+    }
+    CFLog(@"[Endpoint] YTAppCollectionVC setNavigationEndpoint browseId=%@", browseId ?: @"nil");
+    if (browseId.length > 0) {
+        BOOL isSub = [browseId isEqualToString:@"FEsubscriptions"];
+        [[NSUserDefaults standardUserDefaults] setBool:isSub forKey:@"cf_is_subscription_tab"];
+        [[NSUserDefaults standardUserDefaults] synchronize];
+        CFLog(@"[Endpoint] cf_is_subscription_tab=%d", (int)isSub);
+    }
+}
+%end
+
 %hook YTQTMButton
 - (void)setTitle:(NSString *)title forState:(UIControlState)state {
     %orig;
     NSString *t = [(UIButton *)self titleForState:UIControlStateNormal];
+    if (!t.length) return;
 
-    // タブバーの「登録チャンネル」ボタンを検出してタップハンドラを追加
-    if ([t isEqualToString:@"登録チャンネル"] || [t isEqualToString:@"Subscriptions"]) {
-        // 既にタップハンドラが追加されているか確認
-        NSNumber *tagged = objc_getAssociatedObject(self, "cf_subTabBtn");
-        if (!tagged) {
-            objc_setAssociatedObject(self, "cf_subTabBtn", @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            [self addTarget:self action:@selector(cf_subTabTapped) forControlEvents:UIControlEventTouchUpInside];
-            CFLog(@"[Tab] Subscription tab button detected, handler added");
-        }
-        return; // タブバーボタンなので非表示にしない
-    }
-
-    // タブバーの他のボタンも非表示にしない
-    NSArray *tabTitles = @[@"ホーム",@"ショート",@"マイページ",@"uYou",@"YouTube",
-                           @"Home",@"Shorts",@"You",@"Library",@"フィードバックを送信"];
+    // タブバーボタンは除外
+    NSArray *tabTitles = @[@"ホーム",@"ショート",@"登録チャンネル",@"マイページ",@"uYou",@"YouTube",
+                           @"Home",@"Shorts",@"Subscriptions",@"You",@"Library",@"フィードバックを送信"];
     if ([tabTitles containsObject:t]) return;
 
-    // タブバー以外のYTQTMButton = チャンネルページの登録ボタン
-    // 親VCで確認
+    // 親VCで判定
     UIViewController *vc = nil;
     UIResponder *r = self;
     while ((r = r.nextResponder)) {
         if ([r isKindOfClass:[UIViewController class]]) { vc=(UIViewController *)r; break; }
     }
     NSString *vcName = NSStringFromClass([vc class]);
-    CFLog(@"[SubBtn] title='%@' parentVC=%@", t ?: @"nil", vcName);
-    // Browse/Channel/Profile系のVCにある場合は登録ボタン
+    NSString *accId = self.accessibilityIdentifier ?: @"nil";
+    CFLog(@"[SubBtn] title='%@' accId='%@' parentVC=%@", t, accId, vcName);
     if ([vcName containsString:@"Channel"] || [vcName containsString:@"Browse"] ||
         [vcName containsString:@"Profile"] || [vcName containsString:@"Watch"]) {
         self.hidden = YES; self.alpha = 0;
         CFLog(@"[SubBtn] ✅ hidden");
     }
 }
-
-%new
-- (void)cf_subTabTapped {
-    // 登録チャンネルタブがタップされた
-    [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"cf_is_subscription_tab"];
-    [[NSUserDefaults standardUserDefaults] synchronize];
-    CFLog(@"[Tab] ✅ Subscription tab tapped -> flag=YES");
-    // 他のタブのボタンがタップされたらフラグをクリアするために
-    // 少し後にフラグをリセット（同期完了後）
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        [[NSUserDefaults standardUserDefaults] setBool:NO forKey:@"cf_is_subscription_tab"];
-        [[NSUserDefaults standardUserDefaults] synchronize];
-        CFLog(@"[Tab] Subscription flag auto-cleared after 3s");
-    });
-}
-
 - (void)willMoveToWindow:(UIWindow *)newWindow {
     %orig;
     if (!newWindow) return;
