@@ -225,7 +225,39 @@ static NSString *cf_extractChannelId(NSData *data) {
             #pragma clang diagnostic pop
             if (!elemData || ![elemData isKindOfClass:[NSData class]]) continue;
             NSString *channelId = cf_extractChannelId((NSData *)elemData);
-            if (!channelId.length) continue;
+            if (!channelId.length) {
+                // channelIdが取れないアイテム（ショート等）の調査
+                static NSMutableSet *_shortLog; if (!_shortLog) _shortLog=[NSMutableSet set];
+                NSString *key = [NSString stringWithFormat:@"%lu-%lu", (unsigned long)si, (unsigned long)ii];
+                if (![_shortLog containsObject:key]) {
+                    [_shortLog addObject:key];
+                    // elementDataのサイズとtitleを確認
+                    NSUInteger dataLen = [(NSData *)elemData length];
+                    NSString *rawStr = [[NSString alloc] initWithData:(NSData *)elemData
+                                                             encoding:NSISOLatin1StringEncoding];
+                    // "Reel"や"Short"や"reels"が含まれるか確認
+                    BOOL isShort = rawStr && ([rawStr containsString:@"Reel"] ||
+                                              [rawStr containsString:@"reel"] ||
+                                              [rawStr containsString:@"Short"] ||
+                                              [rawStr containsString:@"short"]);
+                    CFLog(@"[Short?] si=%lu ii=%lu dataLen=%lu isShort=%d",
+                          (unsigned long)si, (unsigned long)ii, (unsigned long)dataLen, (int)isShort);
+                    // UU (チャンネルID代替?) や別パターンを探す
+                    // YouTubeのショートはUCの代わりに別の形式の可能性
+                    NSRegularExpression *r2 = [NSRegularExpression
+                        regularExpressionWithPattern:@"[A-Za-z]{2}[A-Za-z0-9_-]{22}"
+                        options:0 error:nil];
+                    NSArray *matches = [r2 matchesInString:rawStr?:@"" options:0
+                                                     range:NSMakeRange(0, rawStr.length)];
+                    for (NSTextCheckingResult *m in matches) {
+                        NSString *candidate = [rawStr substringWithRange:m.range];
+                        if (![candidate hasPrefix:@"UC"]) { // UC以外のIDパターン
+                            CFLog(@"[Short?]   non-UC id candidate: %@", candidate);
+                        }
+                    }
+                }
+                continue;
+            }
 
             if (isSubscriptionFeed) {
                 [channelIdsForSync addObject:channelId];
