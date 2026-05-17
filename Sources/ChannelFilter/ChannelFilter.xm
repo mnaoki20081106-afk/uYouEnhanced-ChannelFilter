@@ -242,32 +242,10 @@ static NSString *cf_extractChannelId(NSData *data) {
                                               [rawStr containsString:@"short"]);
                     CFLog(@"[Short?] si=%lu ii=%lu dataLen=%lu isShort=%d",
                           (unsigned long)si, (unsigned long)ii, (unsigned long)dataLen, (int)isShort);
-                    // ショートのchannelId調査:
-                    // dataLen=1337のバイナリ内でUCを含む前後の文字列を探す
-                    // また、先頭128バイトをhexダンプして構造を確認
-                    if (rawStr) {
-                        // UC... パターンを全て列挙
-                        NSRegularExpression *ucRe = [NSRegularExpression
-                            regularExpressionWithPattern:@"UC[A-Za-z0-9_-]+"
-                            options:0 error:nil];
-                        NSArray *ucMatches = [ucRe matchesInString:rawStr options:0
-                                                             range:NSMakeRange(0, rawStr.length)];
-                        for (NSTextCheckingResult *m in ucMatches) {
-                            CFLog(@"[Short?]   UC-pattern: %@", [rawStr substringWithRange:m.range]);
-                        }
-                        if (ucMatches.count == 0) {
-                            CFLog(@"[Short?]   NO UC pattern found in %lu bytes", (unsigned long)dataLen);
-                        }
-                        // "channel" という文字列の周辺を確認
-                        NSRange chRange = [rawStr rangeOfString:@"channel"
-                                                        options:NSCaseInsensitiveSearch];
-                        if (chRange.location != NSNotFound) {
-                            NSUInteger start = chRange.location > 10 ? chRange.location-10 : 0;
-                            NSUInteger len = MIN(50, rawStr.length - start);
-                            CFLog(@"[Short?]   near 'channel': %@",
-                                  [rawStr substringWithRange:NSMakeRange(start, len)]);
-                        }
-                    }
+                    // ショートのセクションクラス名を記録（Gemini提案: 丸ごと除去する方針）
+                    CFLog(@"[Short?]   sectionClass=%@ itemClass=%@",
+                          NSStringFromClass([section class]),
+                          NSStringFromClass([item class]));
                 }
                 continue;
             }
