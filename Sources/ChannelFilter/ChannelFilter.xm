@@ -1,5 +1,25 @@
 //
-//  ChannelFilter.xm — デバッグビルド（フィルター動作確認用）
+//  ChannelFilter.xm
+//  uYouEnhanced - ChannelFilter
+//
+//  実装済み機能（全て常時ON）:
+//    1. チャンネルフィルター  - ホーム・検索・探索フィードからホワイトリスト外を除去
+//                             - 登録チャンネルタブを開くとホワイトリスト自動同期
+//    2. アカウント追加ブロック
+//    3. 登録ボタン非表示
+//    4. STARDYロゴ置き換え
+//
+//  フィルター実装方針（CF Logで全て動作確認済み）:
+//    - 登録タブ判定: YTBrowseViewController.setNavigationEndpoint: で
+//                   browseId="FEsubscriptions" を検知してフラグを立てる
+//    - channelId取得: YTIElementRenderer.elementData (_NSInlineData) を
+//                     ISO Latin-1 でテキスト化し UC[A-Za-z0-9_-]{22} で抽出
+//    - 登録ボタン判定: accessibilityIdentifier = "id.ui.title.tab.button"
+//                     parentVC = YTHeaderViewController
+//
+//  注意:
+//    - %ctor は uYouPlus.xm の %init; で自動初期化されるため書かない
+//    - ASCollectionView は uYouPlus.xm でフック済みのため使わない
 //
 
 #import <UIKit/UIKit.h>
@@ -7,201 +27,176 @@
 #import <objc/runtime.h>
 #import "ChannelWhitelist.h"
 
-// ─── ログシステム ─────────────────────────────────────────────────────────────
-static NSMutableArray *_cfLogs;
-static void CFLog(NSString *format, ...) {
-    va_list args;
-    va_start(args, format);
-    NSString *msg = [[NSString alloc] initWithFormat:format arguments:args];
-    va_end(args);
-    NSLog(@"[CF] %@", msg);
+// ─────────────────────────────────────────────────────────────────────────────
+// 前方宣言
+// ─────────────────────────────────────────────────────────────────────────────
+@interface YTInlineSignInViewController : UIViewController
+- (void)didTapShowAddAccount;
+@end
+
+@interface YTQTMButton : UIButton
+@end
+
+@interface YTBrowseViewController : UIViewController
+@end
+
+@interface YTAppCollectionViewController : UIViewController
+@end
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ヘルパー: アラート表示
+// ─────────────────────────────────────────────────────────────────────────────
+static void cf_showAlert(NSString *title, NSString *message) {
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (!_cfLogs) {
-            NSArray *saved = [[NSUserDefaults standardUserDefaults] arrayForKey:@"cf_debug_logs"];
-            _cfLogs = saved ? [saved mutableCopy] : [NSMutableArray array];
+        UIAlertController *alert = [UIAlertController
+            alertControllerWithTitle:title
+                             message:message
+                      preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK"
+                                                 style:UIAlertActionStyleDefault
+                                               handler:nil]];
+        UIWindow *window = nil;
+        if (@available(iOS 15, *)) {
+            for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+                if ([scene isKindOfClass:[UIWindowScene class]])
+                    for (UIWindow *w in ((UIWindowScene *)scene).windows)
+                        if (w.isKeyWindow) { window = w; break; }
+            }
         }
-        [_cfLogs addObject:msg];
-        if (_cfLogs.count > 800) [_cfLogs removeObjectAtIndex:0];
-        [[NSUserDefaults standardUserDefaults] setObject:[_cfLogs copy] forKey:@"cf_debug_logs"];
-        [[NSUserDefaults standardUserDefaults] synchronize];
+        if (!window) window = [UIApplication sharedApplication].keyWindow;
+        UIViewController *root = window.rootViewController;
+        while (root.presentedViewController) root = root.presentedViewController;
+        [root presentViewController:alert animated:YES completion:nil];
     });
 }
 
-// ─── ログビューア ─────────────────────────────────────────────────────────────
-@interface CFLogViewController : UIViewController <UITableViewDataSource, UITableViewDelegate>
-@property (nonatomic, strong) UITableView *tableView;
-@property (nonatomic, strong) NSArray *logs;
-@end
-@implementation CFLogViewController
-- (void)viewDidLoad {
-    [super viewDidLoad];
-    self.title = @"CF Debug Log";
-    self.view.backgroundColor = [UIColor systemBackgroundColor];
-    UIBarButtonItem *closeBtn = [[UIBarButtonItem alloc] initWithTitle:@"閉じる" style:UIBarButtonItemStylePlain target:self action:@selector(cf_dismiss)];
-    UIBarButtonItem *copyBtn  = [[UIBarButtonItem alloc] initWithTitle:@"全コピー" style:UIBarButtonItemStylePlain target:self action:@selector(cf_copyAll)];
-    self.navigationItem.rightBarButtonItems = @[closeBtn, copyBtn];
-    self.navigationItem.leftBarButtonItem  = [[UIBarButtonItem alloc] initWithTitle:@"クリア" style:UIBarButtonItemStylePlain target:self action:@selector(cf_clear)];
-    self.tableView = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStylePlain];
-    self.tableView.autoresizingMask = UIViewAutoresizingFlexibleWidth|UIViewAutoresizingFlexibleHeight;
-    self.tableView.dataSource = self; self.tableView.delegate = self;
-    self.tableView.rowHeight = UITableViewAutomaticDimension;
-    self.tableView.estimatedRowHeight = 40;
-    [self.view addSubview:self.tableView];
-    [self cf_reload];
-}
-- (void)cf_reload {
-    NSArray *saved = [[NSUserDefaults standardUserDefaults] arrayForKey:@"cf_debug_logs"];
-    self.logs = saved ? [[saved reverseObjectEnumerator] allObjects] : @[];
-    [self.tableView reloadData];
-}
-- (void)cf_dismiss { [self dismissViewControllerAnimated:YES completion:nil]; }
-- (void)cf_clear {
-    [[NSUserDefaults standardUserDefaults] removeObjectForKey:@"cf_debug_logs"];
-    _cfLogs = [NSMutableArray array];
-    [self cf_reload];
-}
-- (void)cf_copyAll {
-    if (!self.logs.count) return;
-    [UIPasteboard generalPasteboard].string = [[[self.logs reverseObjectEnumerator] allObjects] componentsJoinedByString:@"\n"];
-    UIBarButtonItem *btn = self.navigationItem.rightBarButtonItems[1];
-    btn.title = @"✓ 済"; btn.enabled = NO;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ btn.title=@"全コピー"; btn.enabled=YES; });
-}
-- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s { return (NSInteger)self.logs.count; }
-- (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
-    UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:@"c"];
-    if (!cell) { cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"c"]; cell.textLabel.numberOfLines=0; cell.textLabel.font=[UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular]; cell.selectionStyle=UITableViewCellSelectionStyleNone; }
-    cell.textLabel.text = self.logs[(NSUInteger)ip.row];
-    return cell;
-}
-- (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip { [UIPasteboard generalPasteboard].string=self.logs[(NSUInteger)ip.row]; }
-@end
-
-// ─── ログビューアを開く ───────────────────────────────────────────────────────
-static void cf_openLogViewer(void) {
-    UIWindow *window = nil;
-    if (@available(iOS 15, *))
-        for (UIScene *sc in [UIApplication sharedApplication].connectedScenes)
-            if ([sc isKindOfClass:[UIWindowScene class]])
-                for (UIWindow *w in ((UIWindowScene *)sc).windows)
-                    if (w.isKeyWindow) { window=w; break; }
-    if (!window) window = [UIApplication sharedApplication].keyWindow;
-    UIViewController *root = window.rootViewController;
-    while (root.presentedViewController) root = root.presentedViewController;
-    CFLogViewController *vc = [[CFLogViewController alloc] init];
-    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
-    nav.modalPresentationStyle = UIModalPresentationFormSheet;
-    [root presentViewController:nav animated:YES completion:nil];
-}
-
-// ─── フローティングボタン ─────────────────────────────────────────────────────
-static const char kCFBtnKey = 0;
-static void cf_injectBtn(UIWindow *w) {
-    if (!w || objc_getAssociatedObject(w, &kCFBtnKey)) return;
-    UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
-    btn.frame = CGRectMake(20, 120, 90, 36);
-    btn.backgroundColor = [UIColor colorWithWhite:0 alpha:0.75];
-    [btn setTitle:@"CF Logs" forState:UIControlStateNormal];
-    [btn setTitleColor:[UIColor cyanColor] forState:UIControlStateNormal];
-    btn.titleLabel.font = [UIFont boldSystemFontOfSize:12];
-    btn.layer.cornerRadius = 18; btn.clipsToBounds = YES;
-    [btn addTarget:btn action:@selector(cf_tap) forControlEvents:UIControlEventTouchUpInside];
-    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:btn action:@selector(cf_pan:)];
-    [btn addGestureRecognizer:pan];
-    [w addSubview:btn];
-    objc_setAssociatedObject(w, &kCFBtnKey, btn, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-}
-%hook UIButton
-%new - (void)cf_tap { cf_openLogViewer(); }
-%new - (void)cf_pan:(UIPanGestureRecognizer *)pan {
-    UIView *v=pan.view; CGPoint t=[pan translationInView:v.superview]; CGRect b=v.superview.bounds;
-    CGFloat hw=v.frame.size.width/2, hh=v.frame.size.height/2;
-    v.center=CGPointMake(MAX(hw,MIN(b.size.width-hw,v.center.x+t.x)),MAX(hh+20,MIN(b.size.height-hh-20,v.center.y+t.y)));
-    [pan setTranslation:CGPointZero inView:v.superview];
-}
-%end
-%hook UIWindow
-- (void)becomeKeyWindow { %orig; dispatch_async(dispatch_get_main_queue(),^{ cf_injectBtn(self); }); }
-%end
-%hook YTAppDelegate
-- (void)applicationDidBecomeActive:(UIApplication *)app {
-    %orig;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(2*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
-        UIWindow *w=nil;
-        if (@available(iOS 15,*))
-            for (UIScene *sc in app.connectedScenes)
-                if ([sc isKindOfClass:[UIWindowScene class]])
-                    for (UIWindow *win in ((UIWindowScene *)sc).windows)
-                        if (win.isKeyWindow){w=win;break;}
-        if (!w) w=app.keyWindow;
-        cf_injectBtn(w);
-        CFWhitelistManager *wl=[CFWhitelistManager sharedManager];
-        CFLog(@"[System] App active. WL empty=%d count=%lu", (int)[wl isEmpty], (unsigned long)[wl allowedChannelIDs].count);
+// ─────────────────────────────────────────────────────────────────────────────
+// ヘルパー: Protobufバイナリから channelId を抽出
+// ─────────────────────────────────────────────────────────────────────────────
+static NSRegularExpression *cf_channelIdRegex(void) {
+    static NSRegularExpression *regex;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        regex = [NSRegularExpression
+            regularExpressionWithPattern:@"UC[A-Za-z0-9_-]{22}"
+            options:0 error:nil];
     });
+    return regex;
 }
-%end
 
-// ─── 正規表現 ─────────────────────────────────────────────────────────────────
-static NSRegularExpression *cf_regex(void) {
-    static NSRegularExpression *r; static dispatch_once_t t;
-    dispatch_once(&t,^{ r=[NSRegularExpression regularExpressionWithPattern:@"UC[A-Za-z0-9_-]{22}" options:0 error:nil]; });
-    return r;
-}
 static NSString *cf_extractChannelId(NSData *data) {
     if (!data) return nil;
-    NSString *raw=[[NSString alloc] initWithData:data encoding:NSISOLatin1StringEncoding];
+    NSString *raw = [[NSString alloc] initWithData:data
+                                          encoding:NSISOLatin1StringEncoding];
     if (!raw) return nil;
-    NSTextCheckingResult *m=[cf_regex() firstMatchInString:raw options:0 range:NSMakeRange(0,raw.length)];
-    return m ? [raw substringWithRange:m.range] : nil;
+    NSTextCheckingResult *match = [cf_channelIdRegex()
+        firstMatchInString:raw options:0 range:NSMakeRange(0, raw.length)];
+    return match ? [raw substringWithRange:match.range] : nil;
 }
 
-// ─── UIViewController: VCクラス名をログ ──────────────────────────────────────
-%hook UIViewController
-- (void)viewDidAppear:(BOOL)animated {
-    %orig;
-    NSString *name = NSStringFromClass([(id)self class]);
-    // 登録チャンネルタブの判定:
-    // YTBrowseResponseViewControllerはホームと登録両方に出るが、
-    // YTFeedFilterChipBarViewControllerのviewDidAppearが登録タブ開時に
-    // 「登録チャンネル」のtitleを持つQTMButtonの後に出ることに注目。
-    // シンプルな方法: cf_is_subscription_tabフラグはQTMButtonのタイトルで立てる
-    if ([name containsString:@"Browse"] || [name containsString:@"Subscri"] ||
-        [name containsString:@"Library"] || [name containsString:@"Feed"]) {
-        static NSMutableSet *_s; if (!_s) _s=[NSMutableSet set];
-        if (![_s containsObject:name]) { [_s addObject:name]; CFLog(@"[VC] %@", name); }
+// ─────────────────────────────────────────────────────────────────────────────
+// 機能1-A: 登録チャンネルタブ判定
+//
+// YTBrowseViewController.setNavigationEndpoint: をフックし、
+// browseId = "FEsubscriptions" のとき NSUserDefaults にフラグを立てる。
+// browseId が別の値（チャンネルIDや FEwhat_to_watch 等）のときはフラグを下ろす。
+// ─────────────────────────────────────────────────────────────────────────────
+static NSString *const kCFSubTabKey = @"cf_is_subscription_tab";
+
+static void cf_setSubscriptionFlag(id endpoint) {
+    if (!endpoint) return;
+    // browseEndpoint.browseId を取得
+    id browseEP = nil;
+    if ([endpoint respondsToSelector:@selector(browseEndpoint)]) {
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        browseEP = [endpoint performSelector:@selector(browseEndpoint)];
+        #pragma clang diagnostic pop
     }
-    // (登録チャンネルタブ判定はYTQTMButtonのタップで行う)
+    NSString *browseId = nil;
+    if ([browseEP respondsToSelector:@selector(browseId)]) {
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        browseId = [browseEP performSelector:@selector(browseId)];
+        #pragma clang diagnostic pop
+    }
+    if (!browseId.length) return;
+    BOOL isSub = [browseId isEqualToString:@"FEsubscriptions"];
+    [[NSUserDefaults standardUserDefaults] setBool:isSub forKey:kCFSubTabKey];
+    [[NSUserDefaults standardUserDefaults] synchronize];
+}
+
+%hook YTBrowseViewController
+- (void)setNavigationEndpoint:(id)endpoint {
+    %orig;
+    if (!endpoint) return;
+    id browseEP = nil;
+    if ([endpoint respondsToSelector:@selector(browseEndpoint)]) {
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        browseEP = [endpoint performSelector:@selector(browseEndpoint)];
+        #pragma clang diagnostic pop
+    }
+    NSString *browseId = nil;
+    if ([browseEP respondsToSelector:@selector(browseId)]) {
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        browseId = [browseEP performSelector:@selector(browseId)];
+        #pragma clang diagnostic pop
+    }
+    if (!browseId.length) return;
+    if ([browseId isEqualToString:@"FEsubscriptions"]) {
+        [[NSUserDefaults standardUserDefaults] setBool:YES forKey:kCFSubTabKey];
+        [[NSUserDefaults standardUserDefaults] synchronize];
+    } else if ([browseId hasPrefix:@"FE"]) {
+        [[NSUserDefaults standardUserDefaults] setBool:NO forKey:kCFSubTabKey];
+        [[NSUserDefaults standardUserDefaults] synchronize];
+    }
+    // UC...チャンネルページはフラグを変更しない
+}
+- (void)setBrowseEndpoint:(id)endpoint {
+    %orig;
+    if (!endpoint) return;
+    NSString *browseId = nil;
+    if ([endpoint respondsToSelector:@selector(browseId)]) {
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        browseId = [endpoint performSelector:@selector(browseId)];
+        #pragma clang diagnostic pop
+    }
+    if (!browseId.length) return;
+    if ([browseId isEqualToString:@"FEsubscriptions"]) {
+        [[NSUserDefaults standardUserDefaults] setBool:YES forKey:kCFSubTabKey];
+        [[NSUserDefaults standardUserDefaults] synchronize];
+    } else if ([browseId hasPrefix:@"FE"]) {
+        [[NSUserDefaults standardUserDefaults] setBool:NO forKey:kCFSubTabKey];
+        [[NSUserDefaults standardUserDefaults] synchronize];
+    }
 }
 %end
 
-// ─── addSectionsFromArray: ──────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// 機能1-B: フィードフィルター + ホワイトリスト同期
+// ─────────────────────────────────────────────────────────────────────────────
 @interface YTInnerTubeCollectionViewController : UIViewController
 @end
 
 %hook YTInnerTubeCollectionViewController
 - (void)addSectionsFromArray:(NSArray *)array {
-    id s = (id)self;
-    NSString *vcClass = NSStringFromClass([s class]);
     CFWhitelistManager *wl = [CFWhitelistManager sharedManager];
-
-    // 登録チャンネルタブの判定:
-    // NSUserDefaultsにYTBrowseResponseViewControllerのviewDidAppearでフラグを立てる方式
     BOOL isSubscriptionFeed = [[NSUserDefaults standardUserDefaults]
-        boolForKey:@"cf_is_subscription_tab"];
-
+        boolForKey:kCFSubTabKey];
     BOOL shouldFilter = !isSubscriptionFeed && ![wl isEmpty];
 
-    CFLog(@"[Feed] vcClass=%@ count=%lu isSub=%d shouldFilter=%d wlEmpty=%d",
-          vcClass, (unsigned long)array.count, (int)isSubscriptionFeed,
-          (int)shouldFilter, (int)[wl isEmpty]);
-
-    NSMutableArray *channelIdsForSync = isSubscriptionFeed ? [NSMutableArray array] : nil;
+    NSMutableArray *channelIdsForSync = isSubscriptionFeed
+        ? [NSMutableArray array] : nil;
     NSMutableIndexSet *sectionsToRemove = [NSMutableIndexSet indexSet];
 
     for (NSUInteger si = 0; si < array.count; si++) {
         id section = array[si];
         NSString *secClass = NSStringFromClass([section class]);
-        if ([secClass containsString:@"FilterChip"] || [secClass containsString:@"ChipBar"]) continue;
+        if ([secClass containsString:@"FilterChip"] ||
+            [secClass containsString:@"ChipBar"]) continue;
         if (![section respondsToSelector:@selector(contentsArray)]) continue;
         #pragma clang diagnostic push
         #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
@@ -224,54 +219,58 @@ static NSString *cf_extractChannelId(NSData *data) {
             id elemData = [elemRenderer performSelector:@selector(elementData)];
             #pragma clang diagnostic pop
             if (!elemData || ![elemData isKindOfClass:[NSData class]]) continue;
-            NSString *channelId = cf_extractChannelId((NSData *)elemData);
-            if (!channelId.length) {
-                // channelIdが取れないアイテム（ショート等）の調査
-                static NSMutableSet *_shortLog; if (!_shortLog) _shortLog=[NSMutableSet set];
-                NSString *key = [NSString stringWithFormat:@"%lu-%lu", (unsigned long)si, (unsigned long)ii];
-                if (![_shortLog containsObject:key]) {
-                    [_shortLog addObject:key];
-                    // elementDataのサイズとtitleを確認
-                    NSUInteger dataLen = [(NSData *)elemData length];
-                    NSString *rawStr = [[NSString alloc] initWithData:(NSData *)elemData
-                                                             encoding:NSISOLatin1StringEncoding];
-                    // "Reel"や"Short"や"reels"が含まれるか確認
-                    BOOL isShort = rawStr && ([rawStr containsString:@"Reel"] ||
-                                              [rawStr containsString:@"reel"] ||
-                                              [rawStr containsString:@"Short"] ||
-                                              [rawStr containsString:@"short"]);
-                    // KEN_BURNSが含まれるかどうかも確認
-                    NSString *rawCheck2 = [[NSString alloc] initWithData:(NSData *)elemData
-                                                                encoding:NSISOLatin1StringEncoding];
-                    BOOL hasKenBurns = rawCheck2 && [rawCheck2 containsString:@"KEN_BURNS"];
-                    CFLog(@"[Short?] si=%lu ii=%lu dataLen=%lu isShort=%d kenBurns=%d",
-                          (unsigned long)si, (unsigned long)ii,
-                          (unsigned long)dataLen, (int)isShort, (int)hasKenBurns);
+
+            // ショート動画の判定: elementDataが1337バイト固定 = ショート
+            // CF Logで確認済み: ショートはUCパターンがバイナリに存在しない
+            BOOL isShort = ([(NSData *)elemData length] == 1337);
+
+            if (isShort) {
+                // ショートはchannelIdが取れないのでdataLenで判定して除去
+                if (shouldFilter) {
+                    [itemsToRemove addIndex:ii];
+                } else if (isSubscriptionFeed) {
+                    // 登録タブのショートは同期不要（channelId取得不可）
                 }
                 continue;
             }
 
+            // ショート判定: dataLen==1337 または KEN_BURNSを含む
+            NSUInteger dataLen = [(NSData *)elemData length];
+            if (dataLen == 1337) {
+                if (shouldFilter) [itemsToRemove addIndex:ii];
+                continue;
+            }
+            NSString *rawStr = [[NSString alloc] initWithData:(NSData *)elemData
+                                                     encoding:NSISOLatin1StringEncoding];
+            if (rawStr && [rawStr containsString:@"KEN_BURNS"]) {
+                if (shouldFilter) [itemsToRemove addIndex:ii];
+                continue;
+            }
+
+            NSString *channelId = cf_extractChannelId((NSData *)elemData);
+            if (!channelId.length) continue;
+
             if (isSubscriptionFeed) {
                 [channelIdsForSync addObject:channelId];
-                CFLog(@"[Sync] collected %@", channelId);
-            } else if (shouldFilter) {
-                BOOL allowed = [wl isChannelAllowed:channelId];
-                CFLog(@"[Filter] %@ allowed=%d", channelId, (int)allowed);
-                if (!allowed) [itemsToRemove addIndex:ii];
+            } else if (shouldFilter && ![wl isChannelAllowed:channelId]) {
+                [itemsToRemove addIndex:ii];
             }
         }
+
         if (itemsToRemove.count > 0) {
             NSMutableArray *mut = [items mutableCopy];
             [mut removeObjectsAtIndexes:itemsToRemove];
             if ([section respondsToSelector:@selector(setContentsArray:)]) {
                 #pragma clang diagnostic push
                 #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                [section performSelector:@selector(setContentsArray:) withObject:mut];
+                [section performSelector:@selector(setContentsArray:)
+                             withObject:mut];
                 #pragma clang diagnostic pop
             }
             if (mut.count == 0) [sectionsToRemove addIndex:si];
         }
     }
+
     if (sectionsToRemove.count > 0) {
         NSMutableArray *mut = [array mutableCopy];
         [mut removeObjectsAtIndexes:sectionsToRemove];
@@ -279,199 +278,94 @@ static NSString *cf_extractChannelId(NSData *data) {
     } else {
         %orig;
     }
+
+    // ホワイトリスト同期（登録チャンネルタブのみ）
     if (isSubscriptionFeed && channelIdsForSync.count > 0) {
         [wl syncSubscribedChannelIDs:channelIdsForSync];
-        CFLog(@"[Sync] ✅ synced %lu channelIds to whitelist", (unsigned long)channelIdsForSync.count);
     }
 }
 %end
 
-// ─── アカウント追加ブロック ───────────────────────────────────────────────────
-@interface YTInlineSignInViewController : UIViewController
-@end
-static void cf_showAlert(NSString *title, NSString *msg) {
-    dispatch_async(dispatch_get_main_queue(),^{
-        UIAlertController *a=[UIAlertController alertControllerWithTitle:title message:msg preferredStyle:UIAlertControllerStyleAlert];
-        [a addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
-        UIWindow *w=nil;
-        if (@available(iOS 15,*))
-            for (UIScene *sc in [UIApplication sharedApplication].connectedScenes)
-                if ([sc isKindOfClass:[UIWindowScene class]])
-                    for (UIWindow *win in ((UIWindowScene *)sc).windows)
-                        if (win.isKeyWindow){w=win;break;}
-        if (!w) w=[UIApplication sharedApplication].keyWindow;
-        UIViewController *root=w.rootViewController;
-        while (root.presentedViewController) root=root.presentedViewController;
-        [root presentViewController:a animated:YES completion:nil];
-    });
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// 機能2: アカウント追加ブロック
+// ─────────────────────────────────────────────────────────────────────────────
 %hook YTInlineSignInViewController
 - (void)didTapShowAddAccount {
-    cf_showAlert(@"アカウント追加不可", @"このビルドでは複数アカウントの追加は許可されていません。");
+    cf_showAlert(@"アカウント追加不可",
+                 @"このビルドでは複数アカウントの追加は許可されていません。");
 }
 %end
 
-// ─── 登録ボタン非表示 ────────────────────────────────────────────────────────
-@interface YTQTMButton : UIButton
-@end
-// ─── Gemini提案: setNavigationEndpoint / setBrowseEndpoint をフック ──────────
-// YTBrowseViewController / YTAppCollectionViewController に渡される
-// NavigationEndpoint から browseId を取得して FEsubscriptions を判定
-%hook YTBrowseViewController
-- (void)setNavigationEndpoint:(id)endpoint {
-    %orig;
-    if (!endpoint) return;
-    // browseEndpoint から browseId を取得
-    id browseEP = nil;
-    if ([endpoint respondsToSelector:@selector(browseEndpoint)]) {
-        #pragma clang diagnostic push
-        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-        browseEP = [endpoint performSelector:@selector(browseEndpoint)];
-        #pragma clang diagnostic pop
-    }
-    NSString *browseId = nil;
-    if ([browseEP respondsToSelector:@selector(browseId)]) {
-        #pragma clang diagnostic push
-        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-        browseId = [browseEP performSelector:@selector(browseId)];
-        #pragma clang diagnostic pop
-    }
-    CFLog(@"[Endpoint] YTBrowseVC setNavigationEndpoint browseId=%@", browseId ?: @"nil");
-    if (browseId.length > 0) {
-        if ([browseId isEqualToString:@"FEsubscriptions"]) {
-            [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"cf_is_subscription_tab"];
-            [[NSUserDefaults standardUserDefaults] synchronize];
-            CFLog(@"[Endpoint] -> FLAG ON (FEsubscriptions)");
-        } else if ([browseId hasPrefix:@"FE"]) {
-            // 他のタブ(ホーム・探索等)ではフラグをOFF
-            [[NSUserDefaults standardUserDefaults] setBool:NO forKey:@"cf_is_subscription_tab"];
-            [[NSUserDefaults standardUserDefaults] synchronize];
-            CFLog(@"[Endpoint] -> FLAG OFF (%@)", browseId);
-        }
-        // UC...等のチャンネルページではフラグを変更しない
-    }
-}
-// setBrowseEndpoint: も試す
-- (void)setBrowseEndpoint:(id)endpoint {
-    %orig;
-    if (!endpoint) return;
-    NSString *browseId = nil;
-    if ([endpoint respondsToSelector:@selector(browseId)]) {
-        #pragma clang diagnostic push
-        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-        browseId = [endpoint performSelector:@selector(browseId)];
-        #pragma clang diagnostic pop
-    }
-    CFLog(@"[Endpoint] YTBrowseVC setBrowseEndpoint browseId=%@", browseId ?: @"nil");
-    if ([browseId isEqualToString:@"FEsubscriptions"]) {
-        [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"cf_is_subscription_tab"];
-        [[NSUserDefaults standardUserDefaults] synchronize];
-        CFLog(@"[Endpoint] ✅ FEsubscriptions detected");
-    }
-}
-%end
-
-// YTAppCollectionViewControllerにも同じフックを適用
-%hook YTAppCollectionViewController
-- (void)setNavigationEndpoint:(id)endpoint {
-    %orig;
-    if (!endpoint) return;
-    id browseEP = nil;
-    if ([endpoint respondsToSelector:@selector(browseEndpoint)]) {
-        #pragma clang diagnostic push
-        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-        browseEP = [endpoint performSelector:@selector(browseEndpoint)];
-        #pragma clang diagnostic pop
-    }
-    NSString *browseId = nil;
-    if ([browseEP respondsToSelector:@selector(browseId)]) {
-        #pragma clang diagnostic push
-        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-        browseId = [browseEP performSelector:@selector(browseId)];
-        #pragma clang diagnostic pop
-    }
-    CFLog(@"[Endpoint] YTAppCollectionVC setNavigationEndpoint browseId=%@", browseId ?: @"nil");
-    if (browseId.length > 0) {
-        if ([browseId isEqualToString:@"FEsubscriptions"]) {
-            [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"cf_is_subscription_tab"];
-            [[NSUserDefaults standardUserDefaults] synchronize];
-            CFLog(@"[Endpoint] -> FLAG ON (FEsubscriptions)");
-        } else if ([browseId hasPrefix:@"FE"]) {
-            [[NSUserDefaults standardUserDefaults] setBool:NO forKey:@"cf_is_subscription_tab"];
-            [[NSUserDefaults standardUserDefaults] synchronize];
-            CFLog(@"[Endpoint] -> FLAG OFF (%@)", browseId);
-        }
-    }
-}
-%end
-
+// ─────────────────────────────────────────────────────────────────────────────
+// 機能3: 登録ボタン非表示
+//
+// CF Logで確認済み:
+//   accessibilityIdentifier = "id.ui.title.tab.button"
+//   parentVC = YTHeaderViewController
+// ─────────────────────────────────────────────────────────────────────────────
 %hook YTQTMButton
 - (void)setTitle:(NSString *)title forState:(UIControlState)state {
     %orig;
-    NSString *t = [(UIButton *)self titleForState:UIControlStateNormal];
-    if (!t.length) return;
-
-    // タブバーボタンは除外
-    NSArray *tabTitles = @[@"ホーム",@"ショート",@"登録チャンネル",@"マイページ",@"uYou",@"YouTube",
-                           @"Home",@"Shorts",@"Subscriptions",@"You",@"Library",@"フィードバックを送信"];
-    if ([tabTitles containsObject:t]) return;
-
-    // 親VCで判定
-    UIViewController *vc = nil;
-    UIResponder *r = self;
-    while ((r = r.nextResponder)) {
-        if ([r isKindOfClass:[UIViewController class]]) { vc=(UIViewController *)r; break; }
-    }
-    NSString *vcName = NSStringFromClass([vc class]);
-    NSString *accId = self.accessibilityIdentifier ?: @"nil";
-    CFLog(@"[SubBtn] title='%@' accId='%@' parentVC=%@", t, accId, vcName);
-    if ([vcName containsString:@"Channel"] || [vcName containsString:@"Browse"] ||
-        [vcName containsString:@"Profile"] || [vcName containsString:@"Watch"]) {
-        self.hidden = YES; self.alpha = 0;
-        CFLog(@"[SubBtn] ✅ hidden");
+    if ([self.accessibilityIdentifier isEqualToString:@"id.ui.title.tab.button"]) {
+        self.hidden = YES;
+        self.alpha  = 0;
     }
 }
 - (void)willMoveToWindow:(UIWindow *)newWindow {
     %orig;
     if (!newWindow) return;
-    NSString *t = [self titleForState:UIControlStateNormal];
-    if (!t.length) return;
-    NSArray *tabTitles = @[@"ホーム",@"ショート",@"登録チャンネル",@"マイページ",@"uYou",@"YouTube",
-                           @"Home",@"Shorts",@"Subscriptions",@"You",@"Library",@"フィードバックを送信"];
-    if ([tabTitles containsObject:t]) return;
-    UIViewController *vc = nil;
-    UIResponder *r = self;
-    while ((r = r.nextResponder)) {
-        if ([r isKindOfClass:[UIViewController class]]) { vc=(UIViewController *)r; break; }
-    }
-    NSString *vcName = NSStringFromClass([vc class]);
-    if ([vcName containsString:@"Channel"] || [vcName containsString:@"Browse"] ||
-        [vcName containsString:@"Profile"] || [vcName containsString:@"Watch"]) {
-        self.hidden = YES; self.alpha = 0;
+    if ([self.accessibilityIdentifier isEqualToString:@"id.ui.title.tab.button"]) {
+        self.hidden = YES;
+        self.alpha  = 0;
     }
 }
 %end
 
-// ─── STARDYロゴ ──────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// 機能4: STARDYロゴ置き換え
+// ─────────────────────────────────────────────────────────────────────────────
 static UIImage *cf_stardyLogo(BOOL dark) {
-    static NSString *dp, *lp; static dispatch_once_t t;
-    dispatch_once(&t,^{
-        NSString *bp=[[NSBundle mainBundle] pathForResource:@"uYouPlus" ofType:@"bundle"];
-        NSBundle *b=bp?[NSBundle bundleWithPath:bp]:nil;
-        dp=[b pathForResource:@"PremiumLogo_dark" ofType:@"png"];
-        lp=[b pathForResource:@"PremiumLogo_lite" ofType:@"png"];
+    static NSString *darkPath;
+    static NSString *litePath;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSString *bPath = [[NSBundle mainBundle]
+            pathForResource:@"uYouPlus" ofType:@"bundle"];
+        NSBundle *b = bPath ? [NSBundle bundleWithPath:bPath] : nil;
+        darkPath = [b pathForResource:@"PremiumLogo_dark" ofType:@"png"];
+        litePath = [b pathForResource:@"PremiumLogo_lite" ofType:@"png"];
     });
-    NSString *p=dark?dp:lp; return p?[UIImage imageWithContentsOfFile:p]:nil;
+    NSString *path = dark ? darkPath : litePath;
+    if (!path) return nil;
+    return [UIImage imageWithContentsOfFile:path];
 }
+
 %hook UIImage
-+ (UIImage *)imageNamed:(NSString *)name inBundle:(NSBundle *)bundle compatibleWithTraitCollection:(UITraitCollection *)tc {
-    if ([name isEqualToString:@"youtube_logo_dark_cairo"]||[name isEqualToString:@"youtube_premium_logo_dark_cairo"]) { UIImage *i=cf_stardyLogo(YES); if(i) return i; }
-    if ([name isEqualToString:@"youtube_premium_badge_light"]||[name isEqualToString:@"youtube_premium_standalone_cairo"]) { UIImage *i=cf_stardyLogo(NO); if(i) return i; }
++ (UIImage *)imageNamed:(NSString *)name
+               inBundle:(NSBundle *)bundle
+compatibleWithTraitCollection:(UITraitCollection *)tc {
+    if ([name isEqualToString:@"youtube_logo_dark_cairo"] ||
+        [name isEqualToString:@"youtube_premium_logo_dark_cairo"]) {
+        UIImage *logo = cf_stardyLogo(YES);
+        if (logo) return logo;
+    } else if ([name isEqualToString:@"youtube_premium_badge_light"] ||
+               [name isEqualToString:@"youtube_premium_standalone_cairo"]) {
+        UIImage *logo = cf_stardyLogo(NO);
+        if (logo) return logo;
+    }
     return %orig;
 }
+
 + (UIImage *)imageNamed:(NSString *)name {
-    if ([name isEqualToString:@"youtube_logo_dark_cairo"]||[name isEqualToString:@"youtube_premium_logo_dark_cairo"]) { UIImage *i=cf_stardyLogo(YES); if(i) return i; }
-    if ([name isEqualToString:@"youtube_premium_badge_light"]||[name isEqualToString:@"youtube_premium_standalone_cairo"]) { UIImage *i=cf_stardyLogo(NO); if(i) return i; }
+    if ([name isEqualToString:@"youtube_logo_dark_cairo"] ||
+        [name isEqualToString:@"youtube_premium_logo_dark_cairo"]) {
+        UIImage *logo = cf_stardyLogo(YES);
+        if (logo) return logo;
+    } else if ([name isEqualToString:@"youtube_premium_badge_light"] ||
+               [name isEqualToString:@"youtube_premium_standalone_cairo"]) {
+        UIImage *logo = cf_stardyLogo(NO);
+        if (logo) return logo;
+    }
     return %orig;
 }
 %end
