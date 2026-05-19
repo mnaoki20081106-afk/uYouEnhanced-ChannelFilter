@@ -30,10 +30,6 @@
 [submodule "Tweaks/YouLoop"]
     path = Tweaks/YouLoop
     url = https://github.com/bhackel/YouLoop.git
-[submodule "Tweaks/YouMute"]
-    path = Tweaks/YouMute
-    url = https://github.com/PoomSmart/YouMute.git
-    branch = main
 [submodule "Tweaks/YouPiP"]
     path = Tweaks/YouPiP
     url = https://github.com/PoomSmart/YouPiP.git
