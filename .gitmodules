@@ -41,9 +41,6 @@
 [submodule "Tweaks/YouSlider"]
     path = Tweaks/YouSlider
     url = https://github.com/PoomSmart/YouSlider.git
-[submodule "Tweaks/YouSpeed"]
-    path = Tweaks/YouSpeed
-    url = https://github.com/PoomSmart/YouSpeed.git
 [submodule "Tweaks/YouTimeStamp"]
     path = Tweaks/YouTimeStamp
     url = https://github.com/aricloverEXTRA/YouTimeStamp.git
