@@ -103,29 +103,6 @@ static NSString *cf_extractChannelId(NSData *data) {
 // ─────────────────────────────────────────────────────────────────────────────
 static NSString *const kCFSubTabKey = @"cf_is_subscription_tab";
 
-static void cf_setSubscriptionFlag(id endpoint) {
-    if (!endpoint) return;
-    // browseEndpoint.browseId を取得
-    id browseEP = nil;
-    if ([endpoint respondsToSelector:@selector(browseEndpoint)]) {
-        #pragma clang diagnostic push
-        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-        browseEP = [endpoint performSelector:@selector(browseEndpoint)];
-        #pragma clang diagnostic pop
-    }
-    NSString *browseId = nil;
-    if ([browseEP respondsToSelector:@selector(browseId)]) {
-        #pragma clang diagnostic push
-        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-        browseId = [browseEP performSelector:@selector(browseId)];
-        #pragma clang diagnostic pop
-    }
-    if (!browseId.length) return;
-    BOOL isSub = [browseId isEqualToString:@"FEsubscriptions"];
-    [[NSUserDefaults standardUserDefaults] setBool:isSub forKey:kCFSubTabKey];
-    [[NSUserDefaults standardUserDefaults] synchronize];
-}
-
 %hook YTBrowseViewController
 - (void)setNavigationEndpoint:(id)endpoint {
     %orig;
