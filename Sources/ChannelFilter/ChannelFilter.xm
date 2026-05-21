@@ -340,7 +340,24 @@ static NSString *cf_extractChannelId(NSData *data) {
             NSString *rawStr = [[NSString alloc] initWithData:(NSData *)elemData
                                                      encoding:NSISOLatin1StringEncoding];
             if (rawStr && [rawStr containsString:@"KEN_BURNS"]) {
-                CFLog(@"[Short] si=%lu ii=%lu KEN_BURNS -> skip", (unsigned long)si, (unsigned long)ii);
+                // KEN_BURNSがあってもchannelIdが取れるか確認（ショート誤判定の調査）
+                NSString *chIdCheck = cf_extractChannelId((NSData *)elemData);
+                CFLog(@"[KEN_BURNS] si=%lu ii=%lu dataLen=%lu channelId=%@",
+                      (unsigned long)si, (unsigned long)ii,
+                      (unsigned long)dataLen,
+                      chIdCheck.length ? chIdCheck : @"nil");
+                // channelIdが取れる場合は通常動画として処理する
+                if (chIdCheck.length) {
+                    if (isSubscriptionFeed) {
+                        [channelIdsForSync addObject:chIdCheck];
+                        CFLog(@"[Sync] collected(KEN_BURNS) %@", chIdCheck);
+                    } else if (shouldFilter) {
+                        BOOL allowed = [wl isChannelAllowed:chIdCheck];
+                        if (!allowed) [itemsToRemove addIndex:ii];
+                    }
+                    continue;
+                }
+                // channelIdが取れない場合のみ本当のショートとしてスキップ
                 if (shouldFilter) [itemsToRemove addIndex:ii];
                 continue;
             }
