@@ -1,25 +1,25 @@
 //
-//  ChannelFilter.xm
-//  uYouEnhanced - ChannelFilter
+// ChannelFilter.xm
+// uYouEnhanced - ChannelFilter
 //
-//  実装済み機能（全て常時ON）:
-//    1. チャンネルフィルター  - ホーム・検索・探索フィードからホワイトリスト外を除去
-//                             - 登録チャンネルタブを開くとホワイトリスト自動同期
-//    2. アカウント追加ブロック
-//    3. 登録ボタン非表示
-//    4. STARDYロゴ置き換え
+// 実装済み機能（全て常時ON）:
+//   1. チャンネルフィルター  - ホーム・検索・探索フィードからホワイトリスト外を除去
+//                            - 登録チャンネルタブを開くとホワイトリスト自動同期
+//   2. アカウント追加ブロック
+//   3. 登録ボタン非表示
+//   4. STARDYロゴ置き換え
 //
-//  フィルター実装方針（CF Logで全て動作確認済み）:
-//    - 登録タブ判定: YTBrowseViewController.setNavigationEndpoint: で
-//                   browseId="FEsubscriptions" を検知してフラグを立てる
-//    - channelId取得: YTIElementRenderer.elementData (_NSInlineData) を
-//                     ISO Latin-1 でテキスト化し UC[A-Za-z0-9_-]{22} で抽出
-//    - 登録ボタン判定: accessibilityIdentifier = "id.ui.title.tab.button"
-//                     parentVC = YTHeaderViewController
+// フィルター実装方針（CF Logで全て動作確認済み）:
+//   - 登録タブ判定: YTBrowseViewController.setNavigationEndpoint: で
+//                  browseId="FEsubscriptions" を検知してフラグを立てる
+//   - channelId取得: YTIElementRenderer.elementData (_NSInlineData) を
+//                    ISO Latin-1 でテキスト化し UC[A-Za-z0-9_-]{22} で抽出
+//   - 登録ボタン判定: accessibilityIdentifier = "id.ui.title.tab.button"
+//                    parentVC = YTHeaderViewController
 //
-//  注意:
-//    - %ctor は uYouPlus.xm の %init; で自動初期化されるため書かない
-//    - ASCollectionView は uYouPlus.xm でフック済みのため使わない
+// 注意:
+//   - %ctor は uYouPlus.xm の %init; で自動初期化されるため書かない
+//   - ASCollectionView は uYouPlus.xm でフック済みのため使わない
 //
 
 #import <UIKit/UIKit.h>
@@ -96,10 +96,6 @@ static NSString *cf_extractChannelId(NSData *data) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 機能1-A: 登録チャンネルタブ判定
-//
-// YTBrowseViewController.setNavigationEndpoint: をフックし、
-// browseId = "FEsubscriptions" のとき NSUserDefaults にフラグを立てる。
-// browseId が別の値（チャンネルIDや FEwhat_to_watch 等）のときはフラグを下ろす。
 // ─────────────────────────────────────────────────────────────────────────────
 static NSString *const kCFSubTabKey = @"cf_is_subscription_tab";
 
@@ -197,21 +193,7 @@ static NSString *const kCFSubTabKey = @"cf_is_subscription_tab";
             #pragma clang diagnostic pop
             if (!elemData || ![elemData isKindOfClass:[NSData class]]) continue;
 
-            // ショート動画の判定: elementDataが1337バイト固定 = ショート
-            // CF Logで確認済み: ショートはUCパターンがバイナリに存在しない
-            BOOL isShort = ([(NSData *)elemData length] == 1337);
-
-            if (isShort) {
-                // ショートはchannelIdが取れないのでdataLenで判定して除去
-                if (shouldFilter) {
-                    [itemsToRemove addIndex:ii];
-                } else if (isSubscriptionFeed) {
-                    // 登録タブのショートは同期不要（channelId取得不可）
-                }
-                continue;
-            }
-
-            // ショート判定: dataLen==1337 または KEN_BURNSを含む
+            // ショート動画判定: dataLen==1337 または KEN_BURNSを含む
             NSUInteger dataLen = [(NSData *)elemData length];
             if (dataLen == 1337) {
                 if (shouldFilter) [itemsToRemove addIndex:ii];
@@ -256,7 +238,6 @@ static NSString *const kCFSubTabKey = @"cf_is_subscription_tab";
         %orig;
     }
 
-    // ホワイトリスト同期（登録チャンネルタブのみ）
     if (isSubscriptionFeed && channelIdsForSync.count > 0) {
         [wl syncSubscribedChannelIDs:channelIdsForSync];
     }
@@ -275,10 +256,6 @@ static NSString *const kCFSubTabKey = @"cf_is_subscription_tab";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 機能3: 登録ボタン非表示
-//
-// CF Logで確認済み:
-//   accessibilityIdentifier = "id.ui.title.tab.button"
-//   parentVC = YTHeaderViewController
 // ─────────────────────────────────────────────────────────────────────────────
 %hook YTQTMButton
 - (void)setTitle:(NSString *)title forState:(UIControlState)state {
