@@ -243,9 +243,6 @@ static NSString *cf_extractChannelId(NSData *data) {
         }
     }
 
-    // %orig には常に編集済みのarrayを渡す
-    // sectionsToRemove がなくても mutableCopy して渡す
-    // (元のarrayをそのまま渡すと YouTube 側が書き換え前のデータで処理するため)
     NSMutableArray *filteredArray = [array mutableCopy];
     if (sectionsToRemove.count > 0) {
         [filteredArray removeObjectsAtIndexes:sectionsToRemove];
@@ -253,10 +250,121 @@ static NSString *cf_extractChannelId(NSData *data) {
               (unsigned long)sectionsToRemove.count,
               (unsigned long)filteredArray.count);
     }
-    %orig(filteredArray);
+
+    BOOL didFilter = (sectionsToRemove.count > 0);
+
+    if (!didFilter) {
+        // フィルタリングなし: 元のまま渡す
+        %orig;
+    } else {
+        // フィルタリングあり: 編集済み配列で %orig を呼んだ後、
+        // setSections: で再セットしてDiffingをトリガーする
+        %orig(filteredArray);
+
+        id s = (id)self;
+        if ([s respondsToSelector:@selector(sections)]) {
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            id currentSections = [s performSelector:@selector(sections)];
+            #pragma clang diagnostic pop
+            if (currentSections && [s respondsToSelector:@selector(setSections:)]) {
+                #pragma clang diagnostic push
+                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                [s performSelector:@selector(setSections:) withObject:currentSections];
+                #pragma clang diagnostic pop
+                CFLog(@"[Render] setSections: triggered type=%@",
+                      NSStringFromClass([currentSections class]));
+            } else {
+                CFLog(@"[Render] setSections: not available on %@",
+                      NSStringFromClass([s class]));
+            }
+        }
+    }
+
     if (isSubscriptionFeed && channelIdsForSync.count > 0) {
         [wl syncSubscribedChannelIDs:channelIdsForSync];
         CFLog(@"[Sync] ✅ synced %lu channelIds to whitelist", (unsigned long)channelIdsForSync.count);
+    }
+}
+
+// setSections: をフックしてフィルタリングする（addSectionsFromArray: が効かない場合の代替）
+// YouTubeはaddSectionsFromArray: でバッファに追加した後、
+// setSections: で全量をUIに反映している可能性がある
+- (void)setSections:(id)sections {
+    id s = (id)self;
+    CFWhitelistManager *wl = [CFWhitelistManager sharedManager];
+    BOOL isSubscriptionFeed = [[NSUserDefaults standardUserDefaults] boolForKey:@"cf_is_subscription_tab"];
+    BOOL shouldFilter = !isSubscriptionFeed && ![wl isEmpty];
+
+    if (!shouldFilter || !sections) {
+        %orig;
+        return;
+    }
+
+    // sections が NSArray かどうか確認
+    if (![sections isKindOfClass:[NSArray class]]) {
+        CFLog(@"[setSections] unknown type=%@, passing through", NSStringFromClass([sections class]));
+        %orig;
+        return;
+    }
+
+    NSArray *sectionsArray = (NSArray *)sections;
+    NSMutableIndexSet *sectionsToRemove = [NSMutableIndexSet indexSet];
+
+    for (NSUInteger si = 0; si < sectionsArray.count; si++) {
+        id section = sectionsArray[si];
+        if (![section respondsToSelector:@selector(contentsArray)]) continue;
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        NSArray *items = [section performSelector:@selector(contentsArray)];
+        #pragma clang diagnostic pop
+        if (!items.count) continue;
+
+        NSMutableIndexSet *itemsToRemove = [NSMutableIndexSet indexSet];
+        for (NSUInteger ii = 0; ii < items.count; ii++) {
+            id item = items[ii];
+            if (![item respondsToSelector:@selector(elementRenderer)]) continue;
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            id elemRenderer = [item performSelector:@selector(elementRenderer)];
+            #pragma clang diagnostic pop
+            if (!elemRenderer) continue;
+            if (![elemRenderer respondsToSelector:@selector(elementData)]) continue;
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            id elemData = [elemRenderer performSelector:@selector(elementData)];
+            #pragma clang diagnostic pop
+            if (!elemData || ![elemData isKindOfClass:[NSData class]]) continue;
+
+            NSString *channelId = cf_extractChannelId((NSData *)elemData);
+            if (!channelId.length) continue;
+
+            BOOL allowed = [wl isChannelAllowed:channelId];
+            if (!allowed) [itemsToRemove addIndex:ii];
+        }
+
+        if (itemsToRemove.count > 0) {
+            NSMutableArray *filteredItems = [items mutableCopy];
+            [filteredItems removeObjectsAtIndexes:itemsToRemove];
+            if ([section respondsToSelector:@selector(setContentsArray:)]) {
+                #pragma clang diagnostic push
+                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                [section performSelector:@selector(setContentsArray:) withObject:filteredItems];
+                #pragma clang diagnostic pop
+            }
+            if (filteredItems.count == 0) [sectionsToRemove addIndex:si];
+        }
+    }
+
+    if (sectionsToRemove.count > 0) {
+        NSMutableArray *filteredSections = [sectionsArray mutableCopy];
+        [filteredSections removeObjectsAtIndexes:sectionsToRemove];
+        CFLog(@"[setSections] ✅ removed %lu sections, passing %lu",
+              (unsigned long)sectionsToRemove.count,
+              (unsigned long)filteredSections.count);
+        %orig(filteredSections);
+    } else {
+        %orig;
     }
 }
 %end
