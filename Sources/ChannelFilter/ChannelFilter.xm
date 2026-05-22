@@ -291,7 +291,6 @@ static NSString *cf_extractChannelId(NSData *data) {
 // YouTubeはaddSectionsFromArray: でバッファに追加した後、
 // setSections: で全量をUIに反映している可能性がある
 - (void)setSections:(id)sections {
-    id s = (id)self;
     CFWhitelistManager *wl = [CFWhitelistManager sharedManager];
     BOOL isSubscriptionFeed = [[NSUserDefaults standardUserDefaults] boolForKey:@"cf_is_subscription_tab"];
     BOOL shouldFilter = !isSubscriptionFeed && ![wl isEmpty];
