@@ -359,7 +359,7 @@ compatibleWithTraitCollection:(UITraitCollection *)tc {
         if (!_logged) _logged = [NSMutableSet set];
         if (![_logged containsObject:name]) {
             [_logged addObject:name];
-            CFLog(@"[ShortsImg] inBundle: %@", name);
+            NSLog(@"[CF][ShortsImg] inBundle: %@", name);
         }
     }
     return %orig;
@@ -393,7 +393,7 @@ compatibleWithTraitCollection:(UITraitCollection *)tc {
         if (!_logged2) _logged2 = [NSMutableSet set];
         if (![_logged2 containsObject:name]) {
             [_logged2 addObject:name];
-            CFLog(@"[ShortsImg] imageNamed: %@", name);
+            NSLog(@"[CF][ShortsImg] imageNamed: %@", name);
         }
     }
     return %orig;
