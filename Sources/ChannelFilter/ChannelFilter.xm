@@ -144,6 +144,44 @@ static NSString *cf_extractChannelId(NSData *data) {
 @end
 
 %hook YTInnerTubeCollectionViewController
+
+// ── 呼び出し順調査 ──────────────────────────────────────────────────────────
+- (void)setInitialSections:(id)sections {
+    id s = (id)self;
+    CFLog(@"[Hook] setInitialSections: vcClass=%@ type=%@",
+          NSStringFromClass([s class]), NSStringFromClass([sections class]));
+    %orig;
+}
+- (void)reloadSections:(id)sections {
+    id s = (id)self;
+    CFLog(@"[Hook] reloadSections: vcClass=%@ type=%@",
+          NSStringFromClass([s class]), NSStringFromClass([sections class]));
+    %orig;
+}
+- (void)updateSections:(id)sections {
+    id s = (id)self;
+    CFLog(@"[Hook] updateSections: vcClass=%@ type=%@",
+          NSStringFromClass([s class]), NSStringFromClass([sections class]));
+    %orig;
+}
+- (void)replaceSections:(id)sections {
+    id s = (id)self;
+    CFLog(@"[Hook] replaceSections: vcClass=%@ type=%@",
+          NSStringFromClass([s class]), NSStringFromClass([sections class]));
+    %orig;
+}
+- (void)setSectionsFromArray:(NSArray *)array {
+    id s = (id)self;
+    CFLog(@"[Hook] setSectionsFromArray: vcClass=%@ count=%lu",
+          NSStringFromClass([s class]), (unsigned long)array.count);
+    %orig;
+}
+- (void)reloadData {
+    id s = (id)self;
+    CFLog(@"[Hook] reloadData vcClass=%@", NSStringFromClass([s class]));
+    %orig;
+}
+
 - (void)addSectionsFromArray:(NSArray *)array {
     id s = (id)self;
     NSString *vcClass = NSStringFromClass([s class]);
