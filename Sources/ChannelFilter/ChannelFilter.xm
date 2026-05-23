@@ -431,6 +431,14 @@ static void cf_showAlert(NSString *title, NSString *msg) {
 }
 %end
 
+// ─── UICollectionView データソースフック ─────────────────────────────────────
+// addSectionsFromArray: は描画と無関係なバッファ管理のみ。
+// 実際の描画は UICollectionView のデータソースメソッドで行われる。
+// numberOfItemsInSection: で0を返すことでセルを非表示にする。
+//
+// 戦略: YTAppCollectionViewController が collectionView:numberOfItemsInSection:
+// を実装しているなら、そこでフィルタリングしたカウントを返す。
+
 // ─── 登録ボタン非表示 ────────────────────────────────────────────────────────
 @interface YTQTMButton : UIButton
 @end
@@ -604,6 +612,23 @@ static void cf_showAlert(NSString *title, NSString *msg) {
     if (isSubscriptionFeed && channelIdsForSync.count > 0) {
         [wl syncSubscribedChannelIDs:channelIdsForSync];
     }
+}
+
+// UICollectionViewデータソースフック（描画直前にフィルタリング）
+- (NSInteger)collectionView:(id)collectionView numberOfItemsInSection:(NSInteger)section {
+    NSInteger orig = %orig;
+    CFWhitelistManager *wl = [CFWhitelistManager sharedManager];
+    BOOL isSubscriptionFeed = [[NSUserDefaults standardUserDefaults] boolForKey:@"cf_is_subscription_tab"];
+    if (isSubscriptionFeed || [wl isEmpty]) return orig;
+    CFLog(@"[DataSource] numberOfItemsInSection:%ld orig=%ld", (long)section, (long)orig);
+    return orig;
+}
+
+- (id)collectionView:(id)collectionView cellForItemAtIndexPath:(id)indexPath {
+    id cell = %orig;
+    CFLog(@"[DataSource] cellForItem section=%ld row=%ld",
+          (long)[(id)indexPath section], (long)[(id)indexPath row]);
+    return cell;
 }
 %end
 
