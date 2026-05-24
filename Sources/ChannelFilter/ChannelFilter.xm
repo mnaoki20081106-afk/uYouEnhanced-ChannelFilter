@@ -81,8 +81,7 @@ static void CFLog(NSString *format, ...) {
 }
 - (void)cf_copyAll {
     if (!self.logs.count) return;
-    [UIPasteboard generalPasteboard].string = [[[self.logs reverseObjectEnumerator] allObjects] componentsJoinedByString:@"
-"];
+    [UIPasteboard generalPasteboard].string = [[[self.logs reverseObjectEnumerator] allObjects] componentsJoinedByString:@"\n"];
     UIBarButtonItem *btn = self.navigationItem.rightBarButtonItems[1];
     btn.title = @"✓ 済"; btn.enabled = NO;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
