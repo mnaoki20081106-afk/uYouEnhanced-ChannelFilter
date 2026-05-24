@@ -28,7 +28,7 @@
 
 // ─── ログシステム ─────────────────────────────────────────────────────────────
 static NSMutableArray *_cfLogs;
-static void __attribute__((unused)) CFLog(NSString *format, ...) {
+static void CFLog(NSString *format, ...) {
     va_list args;
     va_start(args, format);
     NSString *msg = [[NSString alloc] initWithFormat:format arguments:args];
@@ -279,12 +279,15 @@ static UIImage *cf_stardyLogo(BOOL dark) {
         #pragma clang diagnostic pop
     }
     if (!browseId.length) return;
+    CFLog(@"[Endpoint] browseId=%@", browseId);
     if ([browseId isEqualToString:@"FEsubscriptions"]) {
         [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"cf_is_subscription_tab"];
         [[NSUserDefaults standardUserDefaults] synchronize];
+        CFLog(@"[Endpoint] -> FLAG ON");
     } else if ([browseId hasPrefix:@"FE"]) {
         [[NSUserDefaults standardUserDefaults] setBool:NO forKey:@"cf_is_subscription_tab"];
         [[NSUserDefaults standardUserDefaults] synchronize];
+        CFLog(@"[Endpoint] -> FLAG OFF (%@)", browseId);
     }
     // UC...チャンネルページはフラグを変更しない
 }
@@ -327,7 +330,10 @@ static UIImage *cf_stardyLogo(BOOL dark) {
         boolForKey:@"cf_is_subscription_tab"];
     BOOL shouldFilter = !isSubscriptionFeed && ![wl isEmpty];
 
-    // フィルター不要かつ同期不要なら即リターン
+    CFLog(@"[AppVC] count=%lu isSub=%d shouldFilter=%d wlEmpty=%d",
+          (unsigned long)array.count, (int)isSubscriptionFeed,
+          (int)shouldFilter, (int)[wl isEmpty]);
+
     if (!shouldFilter && !isSubscriptionFeed) {
         %orig;
         return;
@@ -367,18 +373,18 @@ static UIImage *cf_stardyLogo(BOOL dark) {
 
             NSString *channelId = cf_extractChannelId((NSData *)elemData);
             if (!channelId.length) {
-                // channelIdが取れない = ショートまたは広告
-                // フィルター中は除去する（登録チャンネル以外なので）
+                // channelIdなし = ショート・広告 → フィルター中は除去
                 if (shouldFilter) [itemsToRemove addIndex:ii];
                 continue;
             }
 
             if (isSubscriptionFeed) {
                 [channelIdsForSync addObject:channelId];
+                CFLog(@"[Sync] %@", channelId);
             } else if (shouldFilter) {
-                if (![wl isChannelAllowed:channelId]) {
-                    [itemsToRemove addIndex:ii];
-                }
+                BOOL allowed = [wl isChannelAllowed:channelId];
+                CFLog(@"[Filter] %@ allowed=%d", channelId, (int)allowed);
+                if (!allowed) [itemsToRemove addIndex:ii];
             }
         }
 
@@ -399,11 +405,15 @@ static UIImage *cf_stardyLogo(BOOL dark) {
     NSMutableArray *filteredArray = [array mutableCopy];
     if (sectionsToRemove.count > 0) {
         [filteredArray removeObjectsAtIndexes:sectionsToRemove];
+        CFLog(@"[AppVC] ✅ removed=%lu remaining=%lu",
+              (unsigned long)sectionsToRemove.count,
+              (unsigned long)filteredArray.count);
     }
     %orig(filteredArray);
 
     if (isSubscriptionFeed && channelIdsForSync.count > 0) {
         [wl syncSubscribedChannelIDs:channelIdsForSync];
+        CFLog(@"[Sync] ✅ synced %lu ids", (unsigned long)channelIdsForSync.count);
     }
 }
 %end
