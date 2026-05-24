@@ -457,6 +457,97 @@ static UIImage *cf_stardyLogo(BOOL dark) {
 }
 %end
 
+// ─── YTInnerTubeCollectionViewController フック ───────────────────────────────
+// YTAppCollectionViewController の親クラス。
+// ショートなど一部コンテンツはこちら経由で追加される場合がある。
+@interface YTInnerTubeCollectionViewController : UIViewController
+@end
+
+%hook YTInnerTubeCollectionViewController
+- (void)addSectionsFromArray:(NSArray *)array {
+    CFWhitelistManager *wl = [CFWhitelistManager sharedManager];
+    BOOL isSubscriptionFeed = [[NSUserDefaults standardUserDefaults]
+        boolForKey:@"cf_is_subscription_tab"];
+    BOOL shouldFilter = !isSubscriptionFeed && ![wl isEmpty];
+
+    if (!shouldFilter && !isSubscriptionFeed) {
+        %orig;
+        return;
+    }
+
+    NSMutableArray *channelIdsForSync = isSubscriptionFeed
+        ? [NSMutableArray array] : nil;
+    NSMutableIndexSet *sectionsToRemove = [NSMutableIndexSet indexSet];
+
+    for (NSUInteger si = 0; si < array.count; si++) {
+        id section = array[si];
+        NSString *secClass = NSStringFromClass([section class]);
+        if ([secClass containsString:@"FilterChip"] ||
+            [secClass containsString:@"ChipBar"]) continue;
+        if (![section respondsToSelector:@selector(contentsArray)]) continue;
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        NSArray *items = [section performSelector:@selector(contentsArray)];
+        #pragma clang diagnostic pop
+        if (!items.count) continue;
+
+        NSMutableIndexSet *itemsToRemove = [NSMutableIndexSet indexSet];
+        for (NSUInteger ii = 0; ii < items.count; ii++) {
+            id item = items[ii];
+            if (![item respondsToSelector:@selector(elementRenderer)]) continue;
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            id elemRenderer = [item performSelector:@selector(elementRenderer)];
+            #pragma clang diagnostic pop
+            if (!elemRenderer) continue;
+            if (![elemRenderer respondsToSelector:@selector(elementData)]) continue;
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            id elemData = [elemRenderer performSelector:@selector(elementData)];
+            #pragma clang diagnostic pop
+            if (!elemData || ![elemData isKindOfClass:[NSData class]]) continue;
+
+            NSString *channelId = cf_extractChannelId((NSData *)elemData);
+            if (!channelId.length) {
+                if (shouldFilter) [itemsToRemove addIndex:ii];
+                continue;
+            }
+
+            if (isSubscriptionFeed) {
+                [channelIdsForSync addObject:channelId];
+            } else if (shouldFilter) {
+                if (![wl isChannelAllowed:channelId]) {
+                    [itemsToRemove addIndex:ii];
+                }
+            }
+        }
+
+        if (itemsToRemove.count > 0) {
+            NSMutableArray *filteredItems = [items mutableCopy];
+            [filteredItems removeObjectsAtIndexes:itemsToRemove];
+            if ([section respondsToSelector:@selector(setContentsArray:)]) {
+                #pragma clang diagnostic push
+                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                [section performSelector:@selector(setContentsArray:)
+                             withObject:filteredItems];
+                #pragma clang diagnostic pop
+            }
+            if (filteredItems.count == 0) [sectionsToRemove addIndex:si];
+        }
+    }
+
+    NSMutableArray *filteredArray = [array mutableCopy];
+    if (sectionsToRemove.count > 0) {
+        [filteredArray removeObjectsAtIndexes:sectionsToRemove];
+    }
+    %orig(filteredArray);
+
+    if (isSubscriptionFeed && channelIdsForSync.count > 0) {
+        [wl syncSubscribedChannelIDs:channelIdsForSync];
+    }
+}
+%end
+
 // ─── ヘルパー: ShortsロゴSVG→PNG ────────────────────────────────────────────
 static UIImage *cf_shortsLogo(void) {
     static NSString *path;
