@@ -366,7 +366,12 @@ static UIImage *cf_stardyLogo(BOOL dark) {
             if (!elemData || ![elemData isKindOfClass:[NSData class]]) continue;
 
             NSString *channelId = cf_extractChannelId((NSData *)elemData);
-            if (!channelId.length) continue; // ショート・広告はスキップ
+            if (!channelId.length) {
+                // channelIdが取れない = ショートまたは広告
+                // フィルター中は除去する（登録チャンネル以外なので）
+                if (shouldFilter) [itemsToRemove addIndex:ii];
+                continue;
+            }
 
             if (isSubscriptionFeed) {
                 [channelIdsForSync addObject:channelId];
@@ -487,27 +492,15 @@ compatibleWithTraitCollection:(UITraitCollection *)tc {
         [name isEqualToString:@"youtube_premium_standalone_cairo"]) {
         UIImage *i = cf_stardyLogo(NO); if (i) return i;
     }
-    // Shortsロゴ置き換え（候補を全て試す）
-    if ([name isEqualToString:@"ic_shorts_logo"] ||
+    // Shortsロゴ置き換え（CF Logで判明した画像名）
+    if ([name isEqualToString:@"youtube_shorts_24_cairo"] ||
+        [name isEqualToString:@"youtube_outline_experimental/shorts_24pt"] ||
+        [name isEqualToString:@"youtube_fill_experimental/shorts_24pt"] ||
+        [name isEqualToString:@"ic_shorts_logo"] ||
         [name isEqualToString:@"youtube_shorts_logo"] ||
         [name isEqualToString:@"shorts_logo"] ||
-        [name isEqualToString:@"reel_logo"] ||
-        [name isEqualToString:@"ic_shorts_logo_fill"] ||
-        [name isEqualToString:@"ic_shorts_logo_outline"] ||
-        [name isEqualToString:@"youtube_shorts_24"] ||
-        [name isEqualToString:@"youtube_shorts_fill_24"] ||
-        [name isEqualToString:@"yt_shorts_logo"]) {
+        [name isEqualToString:@"reel_logo"]) {
         UIImage *i = cf_shortsLogo(); if (i) return i;
-    }
-    // 調査ログ（shortsまたはreelを含む画像名を記録）
-    if ([name containsString:@"shorts"] || [name containsString:@"Shorts"] ||
-        [name containsString:@"reel"] || [name containsString:@"Reel"]) {
-        static NSMutableSet *_logged;
-        if (!_logged) _logged = [NSMutableSet set];
-        if (![_logged containsObject:name]) {
-            [_logged addObject:name];
-            CFLog(@"[ShortsImg] inBundle: %@", name);
-        }
     }
     return %orig;
 }
@@ -522,26 +515,14 @@ compatibleWithTraitCollection:(UITraitCollection *)tc {
         UIImage *i = cf_stardyLogo(NO); if (i) return i;
     }
     // Shortsロゴ置き換え
-    if ([name isEqualToString:@"ic_shorts_logo"] ||
+    if ([name isEqualToString:@"youtube_shorts_24_cairo"] ||
+        [name isEqualToString:@"youtube_outline_experimental/shorts_24pt"] ||
+        [name isEqualToString:@"youtube_fill_experimental/shorts_24pt"] ||
+        [name isEqualToString:@"ic_shorts_logo"] ||
         [name isEqualToString:@"youtube_shorts_logo"] ||
         [name isEqualToString:@"shorts_logo"] ||
-        [name isEqualToString:@"reel_logo"] ||
-        [name isEqualToString:@"ic_shorts_logo_fill"] ||
-        [name isEqualToString:@"ic_shorts_logo_outline"] ||
-        [name isEqualToString:@"youtube_shorts_24"] ||
-        [name isEqualToString:@"youtube_shorts_fill_24"] ||
-        [name isEqualToString:@"yt_shorts_logo"]) {
+        [name isEqualToString:@"reel_logo"]) {
         UIImage *i = cf_shortsLogo(); if (i) return i;
-    }
-    // 調査ログ
-    if ([name containsString:@"shorts"] || [name containsString:@"Shorts"] ||
-        [name containsString:@"reel"] || [name containsString:@"Reel"]) {
-        static NSMutableSet *_logged2;
-        if (!_logged2) _logged2 = [NSMutableSet set];
-        if (![_logged2 containsObject:name]) {
-            [_logged2 addObject:name];
-            CFLog(@"[ShortsImg] imageNamed: %@", name);
-        }
     }
     return %orig;
 }
