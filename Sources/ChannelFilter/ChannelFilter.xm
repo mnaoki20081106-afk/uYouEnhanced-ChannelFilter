@@ -28,7 +28,7 @@
 
 // ─── ログシステム ─────────────────────────────────────────────────────────────
 static NSMutableArray *_cfLogs;
-static void CFLog(NSString *format, ...) {
+static void __attribute__((unused)) CFLog(NSString *format, ...) {
     va_list args;
     va_start(args, format);
     NSString *msg = [[NSString alloc] initWithFormat:format arguments:args];
