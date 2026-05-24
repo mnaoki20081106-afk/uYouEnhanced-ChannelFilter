@@ -26,6 +26,150 @@
 #import <objc/runtime.h>
 #import "ChannelWhitelist.h"
 
+// ─── ログシステム ─────────────────────────────────────────────────────────────
+static NSMutableArray *_cfLogs;
+static void CFLog(NSString *format, ...) {
+    va_list args;
+    va_start(args, format);
+    NSString *msg = [[NSString alloc] initWithFormat:format arguments:args];
+    va_end(args);
+    NSLog(@"[CF] %@", msg);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!_cfLogs) {
+            NSArray *saved = [[NSUserDefaults standardUserDefaults] arrayForKey:@"cf_debug_logs"];
+            _cfLogs = saved ? [saved mutableCopy] : [NSMutableArray array];
+        }
+        [_cfLogs addObject:msg];
+        if (_cfLogs.count > 800) [_cfLogs removeObjectAtIndex:0];
+        [[NSUserDefaults standardUserDefaults] setObject:[_cfLogs copy] forKey:@"cf_debug_logs"];
+        [[NSUserDefaults standardUserDefaults] synchronize];
+    });
+}
+
+// ─── ログビューア ─────────────────────────────────────────────────────────────
+@interface CFLogViewController : UIViewController <UITableViewDataSource, UITableViewDelegate>
+@property (nonatomic, strong) UITableView *tableView;
+@property (nonatomic, strong) NSArray *logs;
+@end
+@implementation CFLogViewController
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"CF Debug Log";
+    self.view.backgroundColor = [UIColor systemBackgroundColor];
+    UIBarButtonItem *closeBtn = [[UIBarButtonItem alloc] initWithTitle:@"閉じる" style:UIBarButtonItemStylePlain target:self action:@selector(cf_dismiss)];
+    UIBarButtonItem *copyBtn  = [[UIBarButtonItem alloc] initWithTitle:@"全コピー" style:UIBarButtonItemStylePlain target:self action:@selector(cf_copyAll)];
+    self.navigationItem.rightBarButtonItems = @[closeBtn, copyBtn];
+    self.navigationItem.leftBarButtonItem  = [[UIBarButtonItem alloc] initWithTitle:@"クリア" style:UIBarButtonItemStylePlain target:self action:@selector(cf_clear)];
+    self.tableView = [[UITableView alloc] initWithFrame:self.view.bounds style:UITableViewStylePlain];
+    self.tableView.autoresizingMask = UIViewAutoresizingFlexibleWidth|UIViewAutoresizingFlexibleHeight;
+    self.tableView.dataSource = self; self.tableView.delegate = self;
+    self.tableView.rowHeight = UITableViewAutomaticDimension;
+    self.tableView.estimatedRowHeight = 40;
+    [self.view addSubview:self.tableView];
+    [self cf_reload];
+}
+- (void)cf_reload {
+    NSArray *saved = [[NSUserDefaults standardUserDefaults] arrayForKey:@"cf_debug_logs"];
+    self.logs = saved ? [[saved reverseObjectEnumerator] allObjects] : @[];
+    [self.tableView reloadData];
+}
+- (void)cf_dismiss { [self dismissViewControllerAnimated:YES completion:nil]; }
+- (void)cf_clear {
+    [[NSUserDefaults standardUserDefaults] removeObjectForKey:@"cf_debug_logs"];
+    _cfLogs = [NSMutableArray array];
+    [self cf_reload];
+}
+- (void)cf_copyAll {
+    if (!self.logs.count) return;
+    [UIPasteboard generalPasteboard].string = [[[self.logs reverseObjectEnumerator] allObjects] componentsJoinedByString:@"
+"];
+    UIBarButtonItem *btn = self.navigationItem.rightBarButtonItems[1];
+    btn.title = @"✓ 済"; btn.enabled = NO;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5*NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        btn.title = @"全コピー"; btn.enabled = YES;
+    });
+}
+- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s { return (NSInteger)self.logs.count; }
+- (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
+    UITableViewCell *cell = [tv dequeueReusableCellWithIdentifier:@"c"];
+    if (!cell) {
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"c"];
+        cell.textLabel.numberOfLines = 0;
+        cell.textLabel.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
+        cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    }
+    cell.textLabel.text = self.logs[(NSUInteger)ip.row];
+    return cell;
+}
+- (void)tableView:(UITableView *)tv didSelectRowAtIndexPath:(NSIndexPath *)ip {
+    [UIPasteboard generalPasteboard].string = self.logs[(NSUInteger)ip.row];
+}
+@end
+
+static void cf_openLogViewer(void) {
+    UIWindow *window = nil;
+    if (@available(iOS 15, *))
+        for (UIScene *sc in [UIApplication sharedApplication].connectedScenes)
+            if ([sc isKindOfClass:[UIWindowScene class]])
+                for (UIWindow *w in ((UIWindowScene *)sc).windows)
+                    if (w.isKeyWindow) { window = w; break; }
+    if (!window) window = [UIApplication sharedApplication].keyWindow;
+    UIViewController *root = window.rootViewController;
+    while (root.presentedViewController) root = root.presentedViewController;
+    CFLogViewController *vc = [[CFLogViewController alloc] init];
+    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
+    nav.modalPresentationStyle = UIModalPresentationFormSheet;
+    [root presentViewController:nav animated:YES completion:nil];
+}
+
+// ─── フローティングボタン ─────────────────────────────────────────────────────
+static const char kCFBtnKey = 0;
+static void cf_injectBtn(UIWindow *w) {
+    if (!w || objc_getAssociatedObject(w, &kCFBtnKey)) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIButton *btn = [UIButton buttonWithType:UIButtonTypeSystem];
+        btn.frame = CGRectMake(20, 120, 90, 36);
+        btn.backgroundColor = [UIColor colorWithWhite:0 alpha:0.75];
+        [btn setTitle:@"CF Logs" forState:UIControlStateNormal];
+        [btn setTitleColor:[UIColor cyanColor] forState:UIControlStateNormal];
+        btn.titleLabel.font = [UIFont boldSystemFontOfSize:12];
+        btn.layer.cornerRadius = 18;
+        btn.clipsToBounds = YES;
+        btn.tag = 0xCF10;
+        [btn addTarget:nil action:@selector(cf_handleTap:) forControlEvents:UIControlEventTouchUpInside];
+        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc]
+            initWithTarget:btn action:@selector(cf_handlePan:)];
+        [btn addGestureRecognizer:pan];
+        [w addSubview:btn];
+        [w bringSubviewToFront:btn];
+        objc_setAssociatedObject(w, &kCFBtnKey, btn, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    });
+}
+
+%hook UIButton
+%new - (void)cf_handleTap:(UIButton *)sender {
+    if (sender.tag == 0xCF10) cf_openLogViewer();
+}
+%new - (void)cf_handlePan:(UIPanGestureRecognizer *)pan {
+    UIView *v = pan.view;
+    CGPoint t = [pan translationInView:v.superview];
+    CGRect b = v.superview.bounds;
+    CGFloat hw = v.frame.size.width/2, hh = v.frame.size.height/2;
+    v.center = CGPointMake(
+        MAX(hw, MIN(b.size.width-hw, v.center.x+t.x)),
+        MAX(hh+20, MIN(b.size.height-hh-20, v.center.y+t.y))
+    );
+    [pan setTranslation:CGPointZero inView:v.superview];
+}
+%end
+
+%hook UIWindow
+- (void)becomeKeyWindow {
+    %orig;
+    dispatch_async(dispatch_get_main_queue(), ^{ cf_injectBtn(self); });
+}
+%end
+
 // ─── 前方宣言 ─────────────────────────────────────────────────────────────────
 @interface YTInlineSignInViewController : UIViewController
 - (void)didTapShowAddAccount;
@@ -108,8 +252,11 @@ static UIImage *cf_stardyLogo(BOOL dark) {
     if (!path) return nil;
     UIImage *raw = [UIImage imageWithContentsOfFile:path];
     if (!raw) return nil;
-    // 1000px / 220pt = 4.5455
-    return [UIImage imageWithCGImage:raw.CGImage scale:4.5455f
+    // scale=2.0 → 1000px / 2.0 = 500pt で表示
+    // ロゴが大きすぎ/小さすぎならscaleを調整:
+    //   小さく見せたい → scale値を大きくする（例: 3.0, 4.0）
+    //   大きく見せたい → scale値を小さくする（例: 1.5, 2.0）
+    return [UIImage imageWithCGImage:raw.CGImage scale:2.0f
                          orientation:UIImageOrientationUp];
 }
 
@@ -321,8 +468,9 @@ static UIImage *cf_shortsLogo(void) {
     if (!path) return nil;
     UIImage *raw = [UIImage imageWithContentsOfFile:path];
     if (!raw) return nil;
-    // 1920px / 48pt = 40.0
-    return [UIImage imageWithCGImage:raw.CGImage scale:40.0f
+    // scale=10.0 → 1920px / 10.0 = 192pt で表示
+    // ロゴが大きすぎ/小さすぎならscaleを調整
+    return [UIImage imageWithCGImage:raw.CGImage scale:10.0f
                          orientation:UIImageOrientationUp];
 }
 
@@ -359,7 +507,7 @@ compatibleWithTraitCollection:(UITraitCollection *)tc {
         if (!_logged) _logged = [NSMutableSet set];
         if (![_logged containsObject:name]) {
             [_logged addObject:name];
-            NSLog(@"[CF][ShortsImg] inBundle: %@", name);
+            CFLog(@"[ShortsImg] inBundle: %@", name);
         }
     }
     return %orig;
@@ -393,7 +541,7 @@ compatibleWithTraitCollection:(UITraitCollection *)tc {
         if (!_logged2) _logged2 = [NSMutableSet set];
         if (![_logged2 containsObject:name]) {
             [_logged2 addObject:name];
-            NSLog(@"[CF][ShortsImg] imageNamed: %@", name);
+            CFLog(@"[ShortsImg] imageNamed: %@", name);
         }
     }
     return %orig;
