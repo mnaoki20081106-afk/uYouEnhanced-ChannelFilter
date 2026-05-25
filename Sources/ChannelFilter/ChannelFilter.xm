@@ -261,6 +261,40 @@ static UIImage *cf_stardyLogo(BOOL dark) {
 
 // ─── 機能1-A: 登録チャンネルタブ判定 ─────────────────────────────────────────
 %hook YTBrowseViewController
+// viewWillAppear: でもタブ判定を試みる（iPhoneでsetNavigationEndpointが効かない場合の補完）
+- (void)viewWillAppear:(BOOL)animated {
+    %orig;
+    id s = (id)self;
+    // タイトルからFEsubscriptionsかどうかを判定
+    if ([s respondsToSelector:@selector(navigationEndpoint)]) {
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        id ep = [s performSelector:@selector(navigationEndpoint)];
+        #pragma clang diagnostic pop
+        if (ep && [ep respondsToSelector:@selector(browseEndpoint)]) {
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            id browseEP = [ep performSelector:@selector(browseEndpoint)];
+            #pragma clang diagnostic pop
+            if (browseEP && [browseEP respondsToSelector:@selector(browseId)]) {
+                #pragma clang diagnostic push
+                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                NSString *bId = [browseEP performSelector:@selector(browseId)];
+                #pragma clang diagnostic pop
+                if ([bId isEqualToString:@"FEsubscriptions"]) {
+                    [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"cf_is_subscription_tab"];
+                    [[NSUserDefaults standardUserDefaults] synchronize];
+                    CFLog(@"[Endpoint] viewWillAppear FLAG ON");
+                } else if (bId.length > 0 && [bId hasPrefix:@"FE"]) {
+                    [[NSUserDefaults standardUserDefaults] setBool:NO forKey:@"cf_is_subscription_tab"];
+                    [[NSUserDefaults standardUserDefaults] synchronize];
+                    CFLog(@"[Endpoint] viewWillAppear FLAG OFF (%@)", bId);
+                }
+            }
+        }
+    }
+}
+
 - (void)setNavigationEndpoint:(id)endpoint {
     %orig;
     if (!endpoint) return;
@@ -329,6 +363,47 @@ static UIImage *cf_stardyLogo(BOOL dark) {
     BOOL isSubscriptionFeed = [[NSUserDefaults standardUserDefaults]
         boolForKey:@"cf_is_subscription_tab"];
     BOOL shouldFilter = !isSubscriptionFeed && ![wl isEmpty];
+
+    // iPhoneではsetNavigationEndpointが呼ばれない場合がある
+    // 親VCのナビゲーションエンドポイントを直接確認して補完
+    if (!isSubscriptionFeed) {
+        id s = (id)self;
+        UIResponder *r = (UIResponder *)s;
+        while ((r = r.nextResponder)) {
+            if ([r isKindOfClass:[UIViewController class]]) {
+                id vc = r;
+                if ([vc respondsToSelector:@selector(navigationEndpoint)]) {
+                    #pragma clang diagnostic push
+                    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                    id ep = [vc performSelector:@selector(navigationEndpoint)];
+                    #pragma clang diagnostic pop
+                    if (ep && [ep respondsToSelector:@selector(browseEndpoint)]) {
+                        #pragma clang diagnostic push
+                        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                        id browseEP = [ep performSelector:@selector(browseEndpoint)];
+                        #pragma clang diagnostic pop
+                        if (browseEP && [browseEP respondsToSelector:@selector(browseId)]) {
+                            #pragma clang diagnostic push
+                            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                            NSString *bId = [browseEP performSelector:@selector(browseId)];
+                            #pragma clang diagnostic pop
+                            if ([bId isEqualToString:@"FEsubscriptions"]) {
+                                isSubscriptionFeed = YES;
+                                shouldFilter = NO;
+                                [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"cf_is_subscription_tab"];
+                                [[NSUserDefaults standardUserDefaults] synchronize];
+                                CFLog(@"[AppVC] FEsubscriptions detected via VC chain");
+                            } else if (bId.length > 0 && [bId hasPrefix:@"FE"]) {
+                                [[NSUserDefaults standardUserDefaults] setBool:NO forKey:@"cf_is_subscription_tab"];
+                                [[NSUserDefaults standardUserDefaults] synchronize];
+                            }
+                        }
+                    }
+                }
+                break;
+            }
+        }
+    }
 
     CFLog(@"[AppVC] count=%lu isSub=%d shouldFilter=%d wlEmpty=%d",
           (unsigned long)array.count, (int)isSubscriptionFeed,
