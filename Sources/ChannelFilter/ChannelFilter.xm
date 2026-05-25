@@ -259,6 +259,70 @@ static UIImage *cf_stardyLogo(BOOL dark) {
                          orientation:UIImageOrientationUp];
 }
 
+// ─── タブバー判定（iPhone対応） ──────────────────────────────────────────────
+@interface YTPivotBarViewController : UIViewController
+@end
+
+%hook YTPivotBarViewController
+- (void)navigateToItemWithEndpoint:(id)endpoint animated:(BOOL)animated {
+    %orig;
+    if (!endpoint) return;
+    id browseEP = nil;
+    if ([endpoint respondsToSelector:@selector(browseEndpoint)]) {
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        browseEP = [endpoint performSelector:@selector(browseEndpoint)];
+        #pragma clang diagnostic pop
+    }
+    NSString *browseId = nil;
+    if ([browseEP respondsToSelector:@selector(browseId)]) {
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        browseId = [browseEP performSelector:@selector(browseId)];
+        #pragma clang diagnostic pop
+    }
+    if (!browseId.length) return;
+    CFLog(@"[PivotBar] navigateToItem browseId=%@", browseId);
+    if ([browseId isEqualToString:@"FEsubscriptions"]) {
+        [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"cf_is_subscription_tab"];
+        [[NSUserDefaults standardUserDefaults] synchronize];
+        CFLog(@"[PivotBar] FLAG ON");
+    } else if ([browseId hasPrefix:@"FE"]) {
+        [[NSUserDefaults standardUserDefaults] setBool:NO forKey:@"cf_is_subscription_tab"];
+        [[NSUserDefaults standardUserDefaults] synchronize];
+        CFLog(@"[PivotBar] FLAG OFF (%@)", browseId);
+    }
+}
+- (void)setSelectedItemEndpoint:(id)endpoint {
+    %orig;
+    if (!endpoint) return;
+    id browseEP = nil;
+    if ([endpoint respondsToSelector:@selector(browseEndpoint)]) {
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        browseEP = [endpoint performSelector:@selector(browseEndpoint)];
+        #pragma clang diagnostic pop
+    }
+    NSString *browseId = nil;
+    if ([browseEP respondsToSelector:@selector(browseId)]) {
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        browseId = [browseEP performSelector:@selector(browseId)];
+        #pragma clang diagnostic pop
+    }
+    if (!browseId.length) return;
+    CFLog(@"[PivotBar] setSelected browseId=%@", browseId);
+    if ([browseId isEqualToString:@"FEsubscriptions"]) {
+        [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"cf_is_subscription_tab"];
+        [[NSUserDefaults standardUserDefaults] synchronize];
+        CFLog(@"[PivotBar] FLAG ON via setSelected");
+    } else if ([browseId hasPrefix:@"FE"]) {
+        [[NSUserDefaults standardUserDefaults] setBool:NO forKey:@"cf_is_subscription_tab"];
+        [[NSUserDefaults standardUserDefaults] synchronize];
+    }
+}
+%end
+
 // ─── 機能1-A: 登録チャンネルタブ判定 ─────────────────────────────────────────
 %hook YTBrowseViewController
 // viewWillAppear: でもタブ判定を試みる（iPhoneでsetNavigationEndpointが効かない場合の補完）
