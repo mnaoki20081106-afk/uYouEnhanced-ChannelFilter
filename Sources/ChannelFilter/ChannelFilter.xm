@@ -547,6 +547,30 @@ static UIImage *cf_stardyLogo(BOOL dark) {
         CFLog(@"[AppVC] ✅ removed=%lu remaining=%lu",
               (unsigned long)sectionsToRemove.count,
               (unsigned long)filteredArray.count);
+        // 残ったアイテムのchannelIdをログ（ショートが混入していないか確認）
+        for (id sec in filteredArray) {
+            if ([sec respondsToSelector:@selector(contentsArray)]) {
+                #pragma clang diagnostic push
+                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                NSArray *its = [sec performSelector:@selector(contentsArray)];
+                #pragma clang diagnostic pop
+                for (id it in its) {
+                    if ([it respondsToSelector:@selector(elementRenderer)]) {
+                        #pragma clang diagnostic push
+                        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                        id er = [it performSelector:@selector(elementRenderer)];
+                        id ed = er ? [er performSelector:@selector(elementData)] : nil;
+                        #pragma clang diagnostic pop
+                        if (ed && [ed isKindOfClass:[NSData class]]) {
+                            NSString *cid = cf_extractChannelId((NSData *)ed);
+                            CFLog(@"[Remain] channelId=%@ dataLen=%lu",
+                                  cid ?: @"nil",
+                                  (unsigned long)[(NSData *)ed length]);
+                        }
+                    }
+                }
+            }
+        }
     }
     %orig(filteredArray);
 
