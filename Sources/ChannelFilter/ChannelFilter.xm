@@ -614,10 +614,19 @@ static UIImage *cf_stardyLogo(BOOL dark) {
 
 %hook YTInnerTubeCollectionViewController
 - (void)addSectionsFromArray:(NSArray *)array {
+    id s = (id)self;
+    NSString *vcClass = NSStringFromClass([s class]);
     CFWhitelistManager *wl = [CFWhitelistManager sharedManager];
     BOOL isSubscriptionFeed = [[NSUserDefaults standardUserDefaults]
         boolForKey:@"cf_is_subscription_tab"];
     BOOL shouldFilter = !isSubscriptionFeed && ![wl isEmpty];
+
+    // YTAppCollectionViewController以外のVCでもフィードが来たらログ
+    if (![vcClass isEqualToString:@"YTAppCollectionViewController"]) {
+        CFLog(@"[InnerTube] vcClass=%@ count=%lu isSub=%d shouldFilter=%d",
+              vcClass, (unsigned long)array.count,
+              (int)isSubscriptionFeed, (int)shouldFilter);
+    }
 
     if (!shouldFilter && !isSubscriptionFeed) {
         %orig;
