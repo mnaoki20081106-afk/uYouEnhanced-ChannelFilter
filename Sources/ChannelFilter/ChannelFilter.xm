@@ -494,6 +494,19 @@ static UIImage *cf_stardyLogo(BOOL dark) {
         #pragma clang diagnostic pop
         if (!items.count) continue;
 
+        // セクション内のアイテム構造をログ（ショートシェルフ特定用）
+        if (shouldFilter && items.count > 0) {
+            NSString *secCls = NSStringFromClass([section class]);
+            id firstItem = items[0];
+            NSString *itemCls = NSStringFromClass([firstItem class]);
+            // contentsArrayが複数アイテムを持つセクションはシェルフの可能性
+            if (items.count > 1) {
+                CFLog(@"[Shelf] si=%lu secCls=%@ itemCount=%lu itemCls=%@",
+                      (unsigned long)si, secCls,
+                      (unsigned long)items.count, itemCls);
+            }
+        }
+
         NSMutableIndexSet *itemsToRemove = [NSMutableIndexSet indexSet];
         for (NSUInteger ii = 0; ii < items.count; ii++) {
             id item = items[ii];
