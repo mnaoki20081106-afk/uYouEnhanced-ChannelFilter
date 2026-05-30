@@ -510,6 +510,26 @@ static UIImage *cf_stardyLogo(BOOL dark) {
         NSMutableIndexSet *itemsToRemove = [NSMutableIndexSet indexSet];
         for (NSUInteger ii = 0; ii < items.count; ii++) {
             id item = items[ii];
+
+            // ショートシェルフ判定: セクション内に複数アイテムがある場合はショートシェルフの可能性
+            // ショートシェルフはアイテム1件ごとに複数のショートを含むreelShelfRenderer
+            // セクション自体のクラス名でショートシェルフを識別してセクションごと除去
+            if (shouldFilter && items.count > 1) {
+                // 複数アイテムを持つセクション = ショートシェルフまたはリッチシェルフ
+                NSString *itemCls = NSStringFromClass([item class]);
+                CFLog(@"[ShelfItem] si=%lu ii=%lu itemCls=%@", (unsigned long)si, (unsigned long)ii, itemCls);
+
+                // reelShelfRenderer / shortsShelfRenderer を持つか確認
+                NSArray *shelfSelectors = @[@"reelShelfRenderer", @"shortsShelfRenderer",
+                                            @"richShelfRenderer", @"horizontalListRenderer"];
+                for (NSString *sel in shelfSelectors) {
+                    SEL s2 = NSSelectorFromString(sel);
+                    if ([item respondsToSelector:s2]) {
+                        CFLog(@"[ShelfItem]   has %@", sel);
+                    }
+                }
+            }
+
             if (![item respondsToSelector:@selector(elementRenderer)]) continue;
             #pragma clang diagnostic push
             #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
@@ -523,9 +543,18 @@ static UIImage *cf_stardyLogo(BOOL dark) {
             #pragma clang diagnostic pop
             if (!elemData || ![elemData isKindOfClass:[NSData class]]) continue;
 
-            NSString *channelId = cf_extractChannelId((NSData *)elemData);
+            NSData *data = (NSData *)elemData;
+            NSString *channelId = cf_extractChannelId(data);
+
+            // channelIdが取れない場合の詳細ログ
             if (!channelId.length) {
-                // channelIdなし = ショート・広告 → フィルター中は除去
+                NSString *raw = [[NSString alloc] initWithData:data encoding:NSISOLatin1StringEncoding];
+                BOOL hasReel = raw && ([raw containsString:@"reel"] || [raw containsString:@"Reel"] ||
+                                       [raw containsString:@"short"] || [raw containsString:@"Short"] ||
+                                       [raw containsString:@"SHORTS"]);
+                CFLog(@"[NoId] si=%lu ii=%lu dataLen=%lu hasReel=%d",
+                      (unsigned long)si, (unsigned long)ii,
+                      (unsigned long)[data length], (int)hasReel);
                 if (shouldFilter) [itemsToRemove addIndex:ii];
                 continue;
             }
@@ -537,6 +566,20 @@ static UIImage *cf_stardyLogo(BOOL dark) {
                 BOOL allowed = [wl isChannelAllowed:channelId];
                 CFLog(@"[Filter] %@ allowed=%d", channelId, (int)allowed);
                 if (!allowed) [itemsToRemove addIndex:ii];
+            }
+        }
+
+        // セクション全体がショートシェルフの場合を判定して除去
+        // ショートシェルフはcontentsArrayの中に複数アイテムがあり、
+        // セクションクラス名に"Shelf"や"Reel"が含まれる
+        if (shouldFilter) {
+            NSString *secCls = NSStringFromClass([section class]);
+            if ([secCls containsString:@"Shelf"] || [secCls containsString:@"Reel"] ||
+                [secCls containsString:@"Short"]) {
+                CFLog(@"[ShelfSection] si=%lu secCls=%@ -> removing entire section",
+                      (unsigned long)si, secCls);
+                [sectionsToRemove addIndex:si];
+                continue;
             }
         }
 
@@ -560,30 +603,6 @@ static UIImage *cf_stardyLogo(BOOL dark) {
         CFLog(@"[AppVC] ✅ removed=%lu remaining=%lu",
               (unsigned long)sectionsToRemove.count,
               (unsigned long)filteredArray.count);
-        // 残ったアイテムのchannelIdをログ（ショートが混入していないか確認）
-        for (id sec in filteredArray) {
-            if ([sec respondsToSelector:@selector(contentsArray)]) {
-                #pragma clang diagnostic push
-                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                NSArray *its = [sec performSelector:@selector(contentsArray)];
-                #pragma clang diagnostic pop
-                for (id it in its) {
-                    if ([it respondsToSelector:@selector(elementRenderer)]) {
-                        #pragma clang diagnostic push
-                        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                        id er = [it performSelector:@selector(elementRenderer)];
-                        id ed = er ? [er performSelector:@selector(elementData)] : nil;
-                        #pragma clang diagnostic pop
-                        if (ed && [ed isKindOfClass:[NSData class]]) {
-                            NSString *cid = cf_extractChannelId((NSData *)ed);
-                            CFLog(@"[Remain] channelId=%@ dataLen=%lu",
-                                  cid ?: @"nil",
-                                  (unsigned long)[(NSData *)ed length]);
-                        }
-                    }
-                }
-            }
-        }
     }
     %orig(filteredArray);
 
