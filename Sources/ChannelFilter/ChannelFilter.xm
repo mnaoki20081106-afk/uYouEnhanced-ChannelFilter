@@ -555,51 +555,14 @@ static UIImage *cf_stardyLogo(BOOL dark) {
         #pragma clang diagnostic pop
         if (!items.count) continue;
 
-        // ショートシェルフ判定（2段階）:
-        // 1. セクションクラスがYTIShelfRendererなら除去
-        // 2. contentsArray内にhorizontalListRenderer→reelItemRendererを持つなら除去
-        // 3. dataLen=1355のアイテムが含まれるなら除去
+        // ショートシェルフ判定:
+        // ダンプで確認: ショートシェルフのセクションクラスは YTIShelfRenderer
+        // 通常動画は YTIItemSectionRenderer
         if (shouldFilter) {
             NSString *secCls2 = NSStringFromClass([section class]);
-
-            // YTIShelfRenderer はショートシェルフのコンテナ
-            if ([secCls2 containsString:@"ShelfRenderer"] ||
-                [secCls2 containsString:@"Shelf"]) {
-                CFLog(@"[ShortShelf] si=%lu -> removed (ShelfRenderer class)", (unsigned long)si);
-                [sectionsToRemove addIndex:si];
-                continue;
-            }
-
-            BOOL isShortShelf = NO;
-            for (id chkItem in items) {
-                // reelItemRenderer を持つかチェック（ダンプで確認済みの構造）
-                if ([chkItem respondsToSelector:@selector(horizontalListRenderer)]) {
-                    #pragma clang diagnostic push
-                    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                    id hlr = [chkItem performSelector:@selector(horizontalListRenderer)];
-                    #pragma clang diagnostic pop
-                    if (hlr && [hlr respondsToSelector:@selector(reelItemRenderer)]) {
-                        isShortShelf = YES;
-                        break;
-                    }
-                }
-                // dataLen=1355 判定（スペーサー兼ショートマーカー）
-                if (![chkItem respondsToSelector:@selector(elementRenderer)]) continue;
-                #pragma clang diagnostic push
-                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                id chkRenderer = [chkItem performSelector:@selector(elementRenderer)];
-                id chkData = chkRenderer ? [chkRenderer performSelector:@selector(elementData)] : nil;
-                #pragma clang diagnostic pop
-                if (chkData && [chkData isKindOfClass:[NSData class]]) {
-                    NSUInteger dlen = [(NSData *)chkData length];
-                    if (dlen >= 1300 && dlen <= 1400) {
-                        isShortShelf = YES;
-                        break;
-                    }
-                }
-            }
-            if (isShortShelf) {
-                CFLog(@"[ShortShelf] si=%lu -> section removed", (unsigned long)si);
+            if ([secCls2 isEqualToString:@"YTIShelfRenderer"] ||
+                [secCls2 containsString:@"ShelfRenderer"]) {
+                CFLog(@"[ShortShelf] si=%lu cls=%@ -> removed", (unsigned long)si, secCls2);
                 [sectionsToRemove addIndex:si];
                 continue;
             }
