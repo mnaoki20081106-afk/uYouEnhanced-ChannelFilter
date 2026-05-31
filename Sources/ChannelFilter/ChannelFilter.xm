@@ -548,25 +548,24 @@ static UIImage *cf_stardyLogo(BOOL dark) {
         NSString *secClass = NSStringFromClass([section class]);
         if ([secClass containsString:@"FilterChip"] ||
             [secClass containsString:@"ChipBar"]) continue;
+
+        // ショートシェルフ判定: YTIShelfRenderer は contentsArray を持たないため
+        // contentsArrayチェックより前に判定する
+        if (shouldFilter) {
+            if ([secClass isEqualToString:@"YTIShelfRenderer"] ||
+                [secClass containsString:@"ShelfRenderer"]) {
+                CFLog(@"[ShortShelf] si=%lu cls=%@ -> removed", (unsigned long)si, secClass);
+                [sectionsToRemove addIndex:si];
+                continue;
+            }
+        }
+
         if (![section respondsToSelector:@selector(contentsArray)]) continue;
         #pragma clang diagnostic push
         #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
         NSArray *items = [section performSelector:@selector(contentsArray)];
         #pragma clang diagnostic pop
         if (!items.count) continue;
-
-        // ショートシェルフ判定:
-        // ダンプで確認: ショートシェルフのセクションクラスは YTIShelfRenderer
-        // 通常動画は YTIItemSectionRenderer
-        if (shouldFilter) {
-            NSString *secCls2 = NSStringFromClass([section class]);
-            if ([secCls2 isEqualToString:@"YTIShelfRenderer"] ||
-                [secCls2 containsString:@"ShelfRenderer"]) {
-                CFLog(@"[ShortShelf] si=%lu cls=%@ -> removed", (unsigned long)si, secCls2);
-                [sectionsToRemove addIndex:si];
-                continue;
-            }
-        }
 
         NSMutableIndexSet *itemsToRemove = [NSMutableIndexSet indexSet];
         for (NSUInteger ii = 0; ii < items.count; ii++) {
