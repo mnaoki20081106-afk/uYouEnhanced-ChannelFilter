@@ -223,6 +223,56 @@ static NSRegularExpression *cf_channelIdRegex(void) {
     return regex;
 }
 
+// ─── デバッグ: 再帰的オブジェクトダンプ ──────────────────────────────────────
+static void cf_dumpObject(id obj, NSUInteger depth, NSUInteger si) {
+    if (!obj || depth > 4) return;
+    NSString *indent = [@"" stringByPaddingToLength:depth * 2 withString:@"  " startingAtIndex:0];
+    NSString *cls = NSStringFromClass([obj class]);
+    CFLog(@"[Dump] si=%lu %@cls=%@", (unsigned long)si, indent, cls);
+
+    // reelShelfRenderer / shortsShelfRenderer を持つか
+    NSArray *shelfKeys = @[@"reelShelfRenderer", @"shortsShelfRenderer",
+                           @"richShelfRenderer", @"horizontalListRenderer",
+                           @"reelItemRenderer", @"shortsLockupViewModel"];
+    for (NSString *key in shelfKeys) {
+        SEL sel = NSSelectorFromString(key);
+        if ([obj respondsToSelector:sel]) {
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            id child = [obj performSelector:sel];
+            #pragma clang diagnostic pop
+            if (child) {
+                CFLog(@"[Dump] si=%lu %@  -> HAS %@", (unsigned long)si, indent, key);
+                cf_dumpObject(child, depth + 1, si);
+            }
+        }
+    }
+
+    // contentsArray を再帰
+    if ([obj respondsToSelector:@selector(contentsArray)]) {
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        NSArray *children = [obj performSelector:@selector(contentsArray)];
+        #pragma clang diagnostic pop
+        if (children.count > 0) {
+            CFLog(@"[Dump] si=%lu %@  contentsArray count=%lu",
+                  (unsigned long)si, indent, (unsigned long)children.count);
+            for (NSUInteger i = 0; i < MIN(children.count, 3); i++) {
+                cf_dumpObject(children[i], depth + 1, si);
+            }
+        }
+    }
+
+    // elementRenderer を再帰
+    if ([obj respondsToSelector:@selector(elementRenderer)]) {
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        id er = [obj performSelector:@selector(elementRenderer)];
+        #pragma clang diagnostic pop
+        if (er) cf_dumpObject(er, depth + 1, si);
+    }
+}
+
 static NSString *cf_extractChannelId(NSData *data) {
     if (!data) return nil;
     NSString *raw = [[NSString alloc] initWithData:data
@@ -473,6 +523,17 @@ static UIImage *cf_stardyLogo(BOOL dark) {
           (unsigned long)array.count, (int)isSubscriptionFeed,
           (int)shouldFilter, (int)[wl isEmpty]);
 
+    // 最初の呼び出しのみ全セクションを再帰ダンプ（構造特定用）
+    static BOOL _dumped = NO;
+    if (!_dumped && shouldFilter && array.count > 5) {
+        _dumped = YES;
+        CFLog(@"[Dump] ===== START DUMP count=%lu =====", (unsigned long)array.count);
+        for (NSUInteger di = 0; di < MIN(array.count, 8); di++) {
+            cf_dumpObject(array[di], 0, di);
+        }
+        CFLog(@"[Dump] ===== END DUMP =====");
+    }
+
     if (!shouldFilter && !isSubscriptionFeed) {
         %orig;
         return;
@@ -494,16 +555,29 @@ static UIImage *cf_stardyLogo(BOOL dark) {
         #pragma clang diagnostic pop
         if (!items.count) continue;
 
-        // セクション内のアイテム構造をログ（ショートシェルフ特定用）
-        if (shouldFilter && items.count > 0) {
-            NSString *secCls = NSStringFromClass([section class]);
-            id firstItem = items[0];
-            NSString *itemCls = NSStringFromClass([firstItem class]);
-            // contentsArrayが複数アイテムを持つセクションはシェルフの可能性
-            if (items.count > 1) {
-                CFLog(@"[Shelf] si=%lu secCls=%@ itemCount=%lu itemCls=%@",
-                      (unsigned long)si, secCls,
-                      (unsigned long)items.count, itemCls);
+        // ショートシェルフ判定: dataLen=1355のアイテムが含まれるセクションは除去
+        // dataLen=1355はショートのサムネイルデータであることをログで確認済み
+        if (shouldFilter) {
+            BOOL isShortShelf = NO;
+            for (id chkItem in items) {
+                if (![chkItem respondsToSelector:@selector(elementRenderer)]) continue;
+                #pragma clang diagnostic push
+                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                id chkRenderer = [chkItem performSelector:@selector(elementRenderer)];
+                id chkData = chkRenderer ? [chkRenderer performSelector:@selector(elementData)] : nil;
+                #pragma clang diagnostic pop
+                if (chkData && [chkData isKindOfClass:[NSData class]]) {
+                    NSUInteger dlen = [(NSData *)chkData length];
+                    if (dlen == 1355 || (dlen >= 1300 && dlen <= 1400)) {
+                        isShortShelf = YES;
+                        break;
+                    }
+                }
+            }
+            if (isShortShelf) {
+                CFLog(@"[ShortShelf] si=%lu -> section removed (dataLen~1355)", (unsigned long)si);
+                [sectionsToRemove addIndex:si];
+                continue;
             }
         }
 
