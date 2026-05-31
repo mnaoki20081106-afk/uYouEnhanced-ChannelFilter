@@ -309,6 +309,71 @@ static UIImage *cf_stardyLogo(BOOL dark) {
                          orientation:UIImageOrientationUp];
 }
 
+// ─── ショートタブ フィルター ─────────────────────────────────────────────────
+@interface YTReelWatchViewController : UIViewController
+@end
+
+%hook YTReelWatchViewController
+- (void)viewWillAppear:(BOOL)animated {
+    %orig;
+    id s = (id)self;
+
+    // selfのプロパティを再帰ダンプしてchannelIdの場所を特定
+    static BOOL _reelDumped = NO;
+    if (!_reelDumped) {
+        _reelDumped = YES;
+        CFLog(@"[Reel] ===== START REEL DUMP =====");
+        NSArray *keys = @[@"model", @"endpoint", @"reelModel", @"reelEndpoint",
+                          @"currentItem", @"currentEndpoint", @"overlayController",
+                          @"playerViewController", @"channelId", @"reelItem"];
+        for (NSString *key in keys) {
+            SEL sel = NSSelectorFromString(key);
+            if ([s respondsToSelector:sel]) {
+                #pragma clang diagnostic push
+                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                id val = [s performSelector:sel];
+                #pragma clang diagnostic pop
+                CFLog(@"[Reel] has %@: %@", key, NSStringFromClass([val class]));
+                if (val) {
+                    // そのオブジェクトのプロパティも調べる
+                    NSArray *subkeys = @[@"channelId", @"browseId", @"reelWatchEndpoint",
+                                        @"reelPlayerOverlayRenderer", @"overlayRenderer",
+                                        @"channelNavigationEndpoint", @"authorText",
+                                        @"reelItem", @"currentReelItem", @"endpoint"];
+                    for (NSString *sk in subkeys) {
+                        SEL ssel = NSSelectorFromString(sk);
+                        if ([val respondsToSelector:ssel]) {
+                            #pragma clang diagnostic push
+                            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                            id sv = [val performSelector:ssel];
+                            #pragma clang diagnostic pop
+                            CFLog(@"[Reel]   %@.%@=%@", key, sk, NSStringFromClass([sv class]));
+                        }
+                    }
+                }
+            }
+        }
+
+        // elementData があればchannelIdを正規表現で抽出
+        NSArray *dataKeys = @[@"elementData", @"reelItemData", @"modelData"];
+        for (NSString *dk in dataKeys) {
+            SEL dsel = NSSelectorFromString(dk);
+            if ([s respondsToSelector:dsel]) {
+                #pragma clang diagnostic push
+                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                id dval = [s performSelector:dsel];
+                #pragma clang diagnostic pop
+                if (dval && [dval isKindOfClass:[NSData class]]) {
+                    NSString *cid = cf_extractChannelId((NSData *)dval);
+                    CFLog(@"[Reel] %@ channelId=%@", dk, cid ?: @"nil");
+                }
+            }
+        }
+        CFLog(@"[Reel] ===== END REEL DUMP =====");
+    }
+}
+%end
+
 // ─── タブバー判定（iPhone対応） ──────────────────────────────────────────────
 @interface YTPivotBarViewController : UIViewController
 @end
