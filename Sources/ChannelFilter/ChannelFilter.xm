@@ -555,11 +555,35 @@ static UIImage *cf_stardyLogo(BOOL dark) {
         #pragma clang diagnostic pop
         if (!items.count) continue;
 
-        // ショートシェルフ判定: dataLen=1355のアイテムが含まれるセクションは除去
-        // dataLen=1355はショートのサムネイルデータであることをログで確認済み
+        // ショートシェルフ判定（2段階）:
+        // 1. セクションクラスがYTIShelfRendererなら除去
+        // 2. contentsArray内にhorizontalListRenderer→reelItemRendererを持つなら除去
+        // 3. dataLen=1355のアイテムが含まれるなら除去
         if (shouldFilter) {
+            NSString *secCls2 = NSStringFromClass([section class]);
+
+            // YTIShelfRenderer はショートシェルフのコンテナ
+            if ([secCls2 containsString:@"ShelfRenderer"] ||
+                [secCls2 containsString:@"Shelf"]) {
+                CFLog(@"[ShortShelf] si=%lu -> removed (ShelfRenderer class)", (unsigned long)si);
+                [sectionsToRemove addIndex:si];
+                continue;
+            }
+
             BOOL isShortShelf = NO;
             for (id chkItem in items) {
+                // reelItemRenderer を持つかチェック（ダンプで確認済みの構造）
+                if ([chkItem respondsToSelector:@selector(horizontalListRenderer)]) {
+                    #pragma clang diagnostic push
+                    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                    id hlr = [chkItem performSelector:@selector(horizontalListRenderer)];
+                    #pragma clang diagnostic pop
+                    if (hlr && [hlr respondsToSelector:@selector(reelItemRenderer)]) {
+                        isShortShelf = YES;
+                        break;
+                    }
+                }
+                // dataLen=1355 判定（スペーサー兼ショートマーカー）
                 if (![chkItem respondsToSelector:@selector(elementRenderer)]) continue;
                 #pragma clang diagnostic push
                 #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
@@ -568,14 +592,14 @@ static UIImage *cf_stardyLogo(BOOL dark) {
                 #pragma clang diagnostic pop
                 if (chkData && [chkData isKindOfClass:[NSData class]]) {
                     NSUInteger dlen = [(NSData *)chkData length];
-                    if (dlen == 1355 || (dlen >= 1300 && dlen <= 1400)) {
+                    if (dlen >= 1300 && dlen <= 1400) {
                         isShortShelf = YES;
                         break;
                     }
                 }
             }
             if (isShortShelf) {
-                CFLog(@"[ShortShelf] si=%lu -> section removed (dataLen~1355)", (unsigned long)si);
+                CFLog(@"[ShortShelf] si=%lu -> section removed", (unsigned long)si);
                 [sectionsToRemove addIndex:si];
                 continue;
             }
@@ -670,6 +694,18 @@ static UIImage *cf_stardyLogo(BOOL dark) {
             if (filteredItems.count == 0) [sectionsToRemove addIndex:si];
         }
     }
+
+    // 除去対象セクションのcontentsArrayを空にする（キャッシュ対策）
+    [sectionsToRemove enumerateIndexesUsingBlock:^(NSUInteger idx, BOOL *stop) {
+        if (idx >= array.count) return;
+        id sec = array[idx];
+        if ([sec respondsToSelector:@selector(setContentsArray:)]) {
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            [sec performSelector:@selector(setContentsArray:) withObject:@[]];
+            #pragma clang diagnostic pop
+        }
+    }];
 
     NSMutableArray *filteredArray = [array mutableCopy];
     if (sectionsToRemove.count > 0) {
