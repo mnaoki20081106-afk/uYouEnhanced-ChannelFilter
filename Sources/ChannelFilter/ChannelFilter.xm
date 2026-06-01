@@ -317,34 +317,37 @@ static UIImage *cf_stardyLogo(BOOL dark) {
 %hook YTShortsPlayerViewController
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
+    CFLog(@"[ShortsFilter] viewDidAppear called");
     CFWhitelistManager *wl = [CFWhitelistManager sharedManager];
-    if ([wl isEmpty]) return;
+    if ([wl isEmpty]) { CFLog(@"[ShortsFilter] wl empty, skip"); return; }
 
     id s = (id)self;
     SEL modelSel = NSSelectorFromString(@"model");
-    if (![s respondsToSelector:modelSel]) return;
+    if (![s respondsToSelector:modelSel]) { CFLog(@"[ShortsFilter] no model selector"); return; }
     #pragma clang diagnostic push
     #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
     id model = [s performSelector:modelSel];
     #pragma clang diagnostic pop
-    if (!model) return;
+    if (!model) { CFLog(@"[ShortsFilter] model is nil"); return; }
+    CFLog(@"[ShortsFilter] model=%@", NSStringFromClass([model class]));
 
-    // endpointからreelWatchEndpointを取得
     SEL epSel = NSSelectorFromString(@"endpoint");
-    if (![model respondsToSelector:epSel]) return;
+    if (![model respondsToSelector:epSel]) { CFLog(@"[ShortsFilter] no endpoint"); return; }
     #pragma clang diagnostic push
     #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
     id ep = [model performSelector:epSel];
     #pragma clang diagnostic pop
-    if (!ep) return;
+    if (!ep) { CFLog(@"[ShortsFilter] ep is nil"); return; }
+    CFLog(@"[ShortsFilter] ep=%@", NSStringFromClass([ep class]));
 
     SEL reelSel = NSSelectorFromString(@"reelWatchEndpoint");
-    if (![ep respondsToSelector:reelSel]) return;
+    if (![ep respondsToSelector:reelSel]) { CFLog(@"[ShortsFilter] no reelWatchEndpoint"); return; }
     #pragma clang diagnostic push
     #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
     id reelEP = [ep performSelector:reelSel];
     #pragma clang diagnostic pop
-    if (!reelEP) return;
+    if (!reelEP) { CFLog(@"[ShortsFilter] reelEP is nil"); return; }
+    CFLog(@"[ShortsFilter] reelEP=%@", NSStringFromClass([reelEP class]));
 
     // YTIReelWatchEndpointのdescriptionからchannelIdを抽出
     NSString *desc = [reelEP description];
