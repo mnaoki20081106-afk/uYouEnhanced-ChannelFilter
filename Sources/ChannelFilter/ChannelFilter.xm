@@ -322,6 +322,72 @@ static UIImage *cf_stardyLogo(BOOL dark) {
     if (!_reelDumped) {
         _reelDumped = YES;
         CFLog(@"[Reel] YTShortsPlayerViewController fired");
+        // YTReelModelの詳細を掘り下げる
+        SEL modelSel = NSSelectorFromString(@"model");
+        if ([s respondsToSelector:modelSel]) {
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            id model = [s performSelector:modelSel];
+            #pragma clang diagnostic pop
+            if (model) {
+                CFLog(@"[Reel] model class=%@", NSStringFromClass([model class]));
+                // YTReelModelのプロパティを全て試す
+                NSArray *modelKeys = @[
+                    @"channelId", @"reelItem", @"reelWatchEndpoint",
+                    @"reelItemRenderer", @"channelNavigationEndpoint",
+                    @"authorText", @"endpoint", @"reelPlayerOverlayRenderer",
+                    @"playerData", @"videoId", @"browseId",
+                    @"reelPlayerOverlay", @"reelItemSequenceInfo",
+                    @"loggingContext", @"elementData", @"itemData",
+                    @"reelWatchInputData", @"inputData"
+                ];
+                for (NSString *k in modelKeys) {
+                    SEL sel = NSSelectorFromString(k);
+                    if ([model respondsToSelector:sel]) {
+                        #pragma clang diagnostic push
+                        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                        id val = [model performSelector:sel];
+                        #pragma clang diagnostic pop
+                        NSString *valCls = val ? NSStringFromClass([val class]) : @"nil";
+                        CFLog(@"[Reel] model.%@=%@", k, valCls);
+                        // NSDataならchannelIdを抽出
+                        if (val && [val isKindOfClass:[NSData class]]) {
+                            NSString *cid = cf_extractChannelId((NSData *)val);
+                            if (cid) CFLog(@"[Reel]   -> channelId=%@", cid);
+                        }
+                        // NSStringならUC始まりか確認
+                        if (val && [val isKindOfClass:[NSString class]]) {
+                            CFLog(@"[Reel]   -> value=%@", val);
+                        }
+                    }
+                }
+                // endpointの中も掘り下げる（YTICommand）
+                SEL epSel = NSSelectorFromString(@"endpoint");
+                if ([model respondsToSelector:epSel]) {
+                    #pragma clang diagnostic push
+                    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                    id ep = [model performSelector:epSel];
+                    #pragma clang diagnostic pop
+                    if (ep) {
+                        NSArray *epKeys = @[@"reelWatchEndpoint", @"browseEndpoint",
+                                            @"reelWatchVideoId", @"videoId",
+                                            @"channelId", @"sequence", @"params"];
+                        for (NSString *k in epKeys) {
+                            SEL sel = NSSelectorFromString(k);
+                            if ([ep respondsToSelector:sel]) {
+                                #pragma clang diagnostic push
+                                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                                id val = [ep performSelector:sel];
+                                #pragma clang diagnostic pop
+                                CFLog(@"[Reel] ep.%@=%@ (%@)", k,
+                                      val ? val : @"nil",
+                                      NSStringFromClass([val class]));
+                            }
+                        }
+                    }
+                }
+            }
+        }
         CFLog(@"[Reel] ===== START REEL DUMP =====");
         NSArray *keys = @[@"model", @"endpoint", @"reelModel", @"reelEndpoint",
                           @"currentItem", @"currentEndpoint", @"overlayController",
