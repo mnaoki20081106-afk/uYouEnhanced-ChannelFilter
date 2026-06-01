@@ -310,35 +310,18 @@ static UIImage *cf_stardyLogo(BOOL dark) {
 }
 
 // ─── ショートタブ フィルター ─────────────────────────────────────────────────
-// ショートタブを開いたときのVC名を特定するためのフック
-%hook UIViewController
-- (void)viewDidAppear:(BOOL)animated {
-    %orig;
-    NSString *cls = NSStringFromClass([(id)self class]);
-    // "Reel" または "Short" を含むVCをログ
-    if ([cls containsString:@"Reel"] || [cls containsString:@"Short"] ||
-        [cls containsString:@"reel"] || [cls containsString:@"short"]) {
-        static NSMutableSet *_vcLogged;
-        if (!_vcLogged) _vcLogged = [NSMutableSet set];
-        if (![_vcLogged containsObject:cls]) {
-            [_vcLogged addObject:cls];
-            CFLog(@"[ReelVC] appeared: %@", cls);
-        }
-    }
-}
-%end
-
-@interface YTReelWatchViewController : UIViewController
+// YTShortsPlayerViewController: 1ショート動画を表示するVC
+@interface YTShortsPlayerViewController : UIViewController
 @end
 
-%hook YTReelWatchViewController
+%hook YTShortsPlayerViewController
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
     id s = (id)self;
     static BOOL _reelDumped = NO;
     if (!_reelDumped) {
         _reelDumped = YES;
-        CFLog(@"[Reel] YTReelWatchViewController viewDidAppear fired");
+        CFLog(@"[Reel] YTShortsPlayerViewController fired");
         CFLog(@"[Reel] ===== START REEL DUMP =====");
         NSArray *keys = @[@"model", @"endpoint", @"reelModel", @"reelEndpoint",
                           @"currentItem", @"currentEndpoint", @"overlayController",
