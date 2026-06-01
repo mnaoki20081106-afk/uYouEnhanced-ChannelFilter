@@ -317,125 +317,86 @@ static UIImage *cf_stardyLogo(BOOL dark) {
 %hook YTShortsPlayerViewController
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
+    CFWhitelistManager *wl = [CFWhitelistManager sharedManager];
+    if ([wl isEmpty]) return;
+
     id s = (id)self;
-    static BOOL _reelDumped = NO;
-    if (!_reelDumped) {
-        _reelDumped = YES;
-        CFLog(@"[Reel] YTShortsPlayerViewController fired");
-        // YTReelModelの詳細を掘り下げる
-        SEL modelSel = NSSelectorFromString(@"model");
-        if ([s respondsToSelector:modelSel]) {
-            #pragma clang diagnostic push
-            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-            id model = [s performSelector:modelSel];
-            #pragma clang diagnostic pop
-            if (model) {
-                CFLog(@"[Reel] model class=%@", NSStringFromClass([model class]));
-                // YTReelModelのプロパティを全て試す
-                NSArray *modelKeys = @[
-                    @"channelId", @"reelItem", @"reelWatchEndpoint",
-                    @"reelItemRenderer", @"channelNavigationEndpoint",
-                    @"authorText", @"endpoint", @"reelPlayerOverlayRenderer",
-                    @"playerData", @"videoId", @"browseId",
-                    @"reelPlayerOverlay", @"reelItemSequenceInfo",
-                    @"loggingContext", @"elementData", @"itemData",
-                    @"reelWatchInputData", @"inputData"
-                ];
-                for (NSString *k in modelKeys) {
-                    SEL sel = NSSelectorFromString(k);
-                    if ([model respondsToSelector:sel]) {
-                        #pragma clang diagnostic push
-                        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                        id val = [model performSelector:sel];
-                        #pragma clang diagnostic pop
-                        NSString *valCls = val ? NSStringFromClass([val class]) : @"nil";
-                        CFLog(@"[Reel] model.%@=%@", k, valCls);
-                        // NSDataならchannelIdを抽出
-                        if (val && [val isKindOfClass:[NSData class]]) {
-                            NSString *cid = cf_extractChannelId((NSData *)val);
-                            if (cid) CFLog(@"[Reel]   -> channelId=%@", cid);
-                        }
-                        // NSStringならUC始まりか確認
-                        if (val && [val isKindOfClass:[NSString class]]) {
-                            CFLog(@"[Reel]   -> value=%@", val);
-                        }
-                    }
+    SEL modelSel = NSSelectorFromString(@"model");
+    if (![s respondsToSelector:modelSel]) return;
+    #pragma clang diagnostic push
+    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+    id model = [s performSelector:modelSel];
+    #pragma clang diagnostic pop
+    if (!model) return;
+
+    // endpointからreelWatchEndpointを取得
+    SEL epSel = NSSelectorFromString(@"endpoint");
+    if (![model respondsToSelector:epSel]) return;
+    #pragma clang diagnostic push
+    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+    id ep = [model performSelector:epSel];
+    #pragma clang diagnostic pop
+    if (!ep) return;
+
+    SEL reelSel = NSSelectorFromString(@"reelWatchEndpoint");
+    if (![ep respondsToSelector:reelSel]) return;
+    #pragma clang diagnostic push
+    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+    id reelEP = [ep performSelector:reelSel];
+    #pragma clang diagnostic pop
+    if (!reelEP) return;
+
+    // YTIReelWatchEndpointのdescriptionからchannelIdを抽出
+    NSString *desc = [reelEP description];
+    if (!desc.length) return;
+
+    NSRegularExpression *regex = [NSRegularExpression
+        regularExpressionWithPattern:@"UC[A-Za-z0-9_-]{22}"
+        options:0 error:nil];
+    NSTextCheckingResult *match = [regex firstMatchInString:desc
+        options:0 range:NSMakeRange(0, desc.length)];
+    if (!match) return;
+
+    NSString *channelId = [desc substringWithRange:match.range];
+    BOOL allowed = [wl isChannelAllowed:channelId];
+    CFLog(@"[ShortsFilter] channelId=%@ allowed=%d", channelId, (int)allowed);
+
+    if (!allowed) {
+        // ホワイトリスト外 → 次の動画へスキップ
+        dispatch_async(dispatch_get_main_queue(), ^{
+            // YTAppReelWatchRootViewController を探して次へ進む
+            id target = s;
+            UIResponder *r = (UIResponder *)s;
+            while ((r = r.nextResponder)) {
+                NSString *cls = NSStringFromClass([r class]);
+                if ([cls containsString:@"ReelWatchRoot"] ||
+                    [cls containsString:@"ShortsSequence"] ||
+                    [cls containsString:@"AppReelWatch"]) {
+                    target = r;
+                    break;
                 }
-                // endpointの中も掘り下げる（YTICommand）
-                SEL epSel = NSSelectorFromString(@"endpoint");
-                if ([model respondsToSelector:epSel]) {
+            }
+            // 次の動画へ進むセレクタを試す
+            NSArray *nextSelectors = @[@"advanceToNextItem",
+                                       @"skipToNextReel",
+                                       @"selectNextReel",
+                                       @"navigateToNextReel",
+                                       @"advanceToNextReel"];
+            for (NSString *selName in nextSelectors) {
+                SEL sel = NSSelectorFromString(selName);
+                if ([target respondsToSelector:sel]) {
+                    CFLog(@"[ShortsFilter] skipping via %@", selName);
                     #pragma clang diagnostic push
                     #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                    id ep = [model performSelector:epSel];
+                    [target performSelector:sel];
                     #pragma clang diagnostic pop
-                    if (ep) {
-                        NSArray *epKeys = @[@"reelWatchEndpoint", @"browseEndpoint",
-                                            @"reelWatchVideoId", @"videoId",
-                                            @"channelId", @"sequence", @"params"];
-                        for (NSString *k in epKeys) {
-                            SEL sel = NSSelectorFromString(k);
-                            if ([ep respondsToSelector:sel]) {
-                                #pragma clang diagnostic push
-                                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                                id val = [ep performSelector:sel];
-                                #pragma clang diagnostic pop
-                                CFLog(@"[Reel] ep.%@=%@ (%@)", k,
-                                      val ? val : @"nil",
-                                      NSStringFromClass([val class]));
-                            }
-                        }
-                    }
+                    return;
                 }
             }
-        }
-        CFLog(@"[Reel] ===== START REEL DUMP =====");
-        NSArray *keys = @[@"model", @"endpoint", @"reelModel", @"reelEndpoint",
-                          @"currentItem", @"currentEndpoint", @"overlayController",
-                          @"playerViewController", @"channelId", @"reelItem"];
-        for (NSString *key in keys) {
-            SEL sel = NSSelectorFromString(key);
-            if ([s respondsToSelector:sel]) {
-                #pragma clang diagnostic push
-                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                id val = [s performSelector:sel];
-                #pragma clang diagnostic pop
-                CFLog(@"[Reel] has %@: %@", key, NSStringFromClass([val class]));
-                if (val) {
-                    // そのオブジェクトのプロパティも調べる
-                    NSArray *subkeys = @[@"channelId", @"browseId", @"reelWatchEndpoint",
-                                        @"reelPlayerOverlayRenderer", @"overlayRenderer",
-                                        @"channelNavigationEndpoint", @"authorText",
-                                        @"reelItem", @"currentReelItem", @"endpoint"];
-                    for (NSString *sk in subkeys) {
-                        SEL ssel = NSSelectorFromString(sk);
-                        if ([val respondsToSelector:ssel]) {
-                            #pragma clang diagnostic push
-                            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                            id sv = [val performSelector:ssel];
-                            #pragma clang diagnostic pop
-                            CFLog(@"[Reel]   %@.%@=%@", key, sk, NSStringFromClass([sv class]));
-                        }
-                    }
-                }
-            }
-        }
-
-        // elementData があればchannelIdを正規表現で抽出
-        NSArray *dataKeys = @[@"elementData", @"reelItemData", @"modelData"];
-        for (NSString *dk in dataKeys) {
-            SEL dsel = NSSelectorFromString(dk);
-            if ([s respondsToSelector:dsel]) {
-                #pragma clang diagnostic push
-                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                id dval = [s performSelector:dsel];
-                #pragma clang diagnostic pop
-                if (dval && [dval isKindOfClass:[NSData class]]) {
-                    NSString *cid = cf_extractChannelId((NSData *)dval);
-                    CFLog(@"[Reel] %@ channelId=%@", dk, cid ?: @"nil");
-                }
-            }
-        }
-        CFLog(@"[Reel] ===== END REEL DUMP =====");
+            // セレクタが見つからない場合は非表示にする
+            CFLog(@"[ShortsFilter] no skip selector found, hiding view");
+            [(UIView *)[(id)s view] setHidden:YES];
+        });
     }
 }
 %end
