@@ -319,7 +319,7 @@ static UIImage *cf_stardyLogo(BOOL dark) {
     %orig;
     CFLog(@"[ShortsFilter] viewDidAppear called");
     CFWhitelistManager *wl = [CFWhitelistManager sharedManager];
-    if ([wl isEmpty]) { CFLog(@"[ShortsFilter] wl empty, skip"); return; }
+    // wlEmptyでもログは続ける（デバッグ中）
 
     id s = (id)self;
     SEL modelSel = NSSelectorFromString(@"model");
@@ -349,22 +349,66 @@ static UIImage *cf_stardyLogo(BOOL dark) {
     if (!reelEP) { CFLog(@"[ShortsFilter] reelEP is nil"); return; }
     CFLog(@"[ShortsFilter] reelEP=%@", NSStringFromClass([reelEP class]));
 
-    // YTIReelWatchEndpointのdescriptionからchannelIdを抽出
+    // reelWatchEndpointのoverlayからchannelIdを取得する
+    // overlayRendererのdescriptionにchannelIdが含まれる可能性がある
+    NSString *channelId = nil;
+
+    // 1. reelEP全体のdescriptionから試す
     NSString *desc = [reelEP description];
-    if (!desc.length) return;
+    CFLog(@"[ShortsFilter] reelEP desc len=%lu", (unsigned long)desc.length);
+    if (desc.length > 0) {
+        NSRegularExpression *regex = [NSRegularExpression
+            regularExpressionWithPattern:@"UC[A-Za-z0-9_-]{22}"
+            options:0 error:nil];
+        NSTextCheckingResult *match = [regex firstMatchInString:desc
+            options:0 range:NSMakeRange(0, desc.length)];
+        if (match) channelId = [desc substringWithRange:match.range];
+    }
+    CFLog(@"[ShortsFilter] from desc: channelId=%@", channelId ?: @"nil");
 
-    NSRegularExpression *regex = [NSRegularExpression
-        regularExpressionWithPattern:@"UC[A-Za-z0-9_-]{22}"
-        options:0 error:nil];
-    NSTextCheckingResult *match = [regex firstMatchInString:desc
-        options:0 range:NSMakeRange(0, desc.length)];
-    if (!match) return;
+    // 2. overlayから試す
+    if (!channelId) {
+        SEL overlaySel = NSSelectorFromString(@"overlay");
+        if ([reelEP respondsToSelector:overlaySel]) {
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            id overlay = [reelEP performSelector:overlaySel];
+            #pragma clang diagnostic pop
+            if (overlay) {
+                NSString *overlayDesc = [overlay description];
+                CFLog(@"[ShortsFilter] overlay cls=%@ descLen=%lu",
+                      NSStringFromClass([overlay class]),
+                      (unsigned long)overlayDesc.length);
+                NSRegularExpression *regex2 = [NSRegularExpression
+                    regularExpressionWithPattern:@"UC[A-Za-z0-9_-]{22}"
+                    options:0 error:nil];
+                NSTextCheckingResult *m2 = [regex2 firstMatchInString:overlayDesc
+                    options:0 range:NSMakeRange(0, overlayDesc.length)];
+                if (m2) channelId = [overlayDesc substringWithRange:m2.range];
+            }
+        }
+    }
+    CFLog(@"[ShortsFilter] after overlay: channelId=%@", channelId ?: @"nil");
 
-    NSString *channelId = [desc substringWithRange:match.range];
+    // 3. model全体のdescriptionから試す
+    if (!channelId) {
+        NSString *modelDesc = [model description];
+        CFLog(@"[ShortsFilter] model desc len=%lu", (unsigned long)modelDesc.length);
+        NSRegularExpression *regex3 = [NSRegularExpression
+            regularExpressionWithPattern:@"UC[A-Za-z0-9_-]{22}"
+            options:0 error:nil];
+        NSTextCheckingResult *m3 = [regex3 firstMatchInString:modelDesc
+            options:0 range:NSMakeRange(0, modelDesc.length)];
+        if (m3) channelId = [modelDesc substringWithRange:m3.range];
+        CFLog(@"[ShortsFilter] from model desc: channelId=%@", channelId ?: @"nil");
+    }
+
+    if (!channelId) { CFLog(@"[ShortsFilter] channelId not found, skip"); return; }
     BOOL allowed = [wl isChannelAllowed:channelId];
-    CFLog(@"[ShortsFilter] channelId=%@ allowed=%d", channelId, (int)allowed);
+    CFLog(@"[ShortsFilter] channelId=%@ allowed=%d wlEmpty=%d",
+          channelId, (int)allowed, (int)[wl isEmpty]);
 
-    if (!allowed) {
+    if (!allowed && ![wl isEmpty]) {
         // ホワイトリスト外 → 次の動画へスキップ
         dispatch_async(dispatch_get_main_queue(), ^{
             // YTAppReelWatchRootViewController を探して次へ進む
