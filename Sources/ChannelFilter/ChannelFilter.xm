@@ -353,10 +353,43 @@ static UIImage *cf_stardyLogo(BOOL dark) {
     // overlayRendererのdescriptionにchannelIdが含まれる可能性がある
     NSString *channelId = nil;
 
-    // 1. reelEP全体のdescriptionから試す
-    NSString *desc = [reelEP description];
-    CFLog(@"[ShortsFilter] reelEP desc len=%lu", (unsigned long)desc.length);
-    if (desc.length > 0) {
+    // 1. reelEP.params をBase64デコードして channelId を抽出
+    // params の末尾に channelId が Base64 エンコードされて含まれている（確認済み）
+    SEL paramsSel = NSSelectorFromString(@"params");
+    if ([reelEP respondsToSelector:paramsSel]) {
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        id paramsVal = [reelEP performSelector:paramsSel];
+        #pragma clang diagnostic pop
+        if (paramsVal && [paramsVal isKindOfClass:[NSString class]]) {
+            NSString *paramsStr = (NSString *)paramsVal;
+            // URL safe base64 → 通常base64
+            NSString *b64 = [paramsStr stringByReplacingOccurrencesOfString:@"-" withString:@"+"];
+            b64 = [b64 stringByReplacingOccurrencesOfString:@"_" withString:@"/"];
+            // パディング追加
+            NSInteger pad = 4 - (b64.length % 4);
+            if (pad < 4) {
+                for (NSInteger i = 0; i < pad; i++) b64 = [b64 stringByAppendingString:@"="];
+            }
+            NSData *decoded = [[NSData alloc] initWithBase64EncodedString:b64 options:0];
+            if (decoded) {
+                NSString *decodedStr = [[NSString alloc] initWithData:decoded encoding:NSISOLatin1StringEncoding];
+                if (decodedStr) {
+                    NSRegularExpression *regex = [NSRegularExpression
+                        regularExpressionWithPattern:@"UC[A-Za-z0-9_-]{22}"
+                        options:0 error:nil];
+                    NSTextCheckingResult *match = [regex firstMatchInString:decodedStr
+                        options:0 range:NSMakeRange(0, decodedStr.length)];
+                    if (match) channelId = [decodedStr substringWithRange:match.range];
+                }
+            }
+        }
+    }
+    CFLog(@"[ShortsFilter] from params: channelId=%@", channelId ?: @"nil");
+
+    // fallback: reelEP全体のdescriptionから試す
+    if (!channelId) {
+        NSString *desc = [reelEP description];
         NSRegularExpression *regex = [NSRegularExpression
             regularExpressionWithPattern:@"UC[A-Za-z0-9_-]{22}"
             options:0 error:nil];
@@ -364,64 +397,8 @@ static UIImage *cf_stardyLogo(BOOL dark) {
             options:0 range:NSMakeRange(0, desc.length)];
         if (match) channelId = [desc substringWithRange:match.range];
     }
-    CFLog(@"[ShortsFilter] from desc: channelId=%@", channelId ?: @"nil");
 
-    // 2. overlayを深く掘る
-    if (!channelId) {
-        SEL overlaySel = NSSelectorFromString(@"overlay");
-        if ([reelEP respondsToSelector:overlaySel]) {
-            #pragma clang diagnostic push
-            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-            id overlay = [reelEP performSelector:overlaySel];
-            #pragma clang diagnostic pop
-            if (overlay) {
-                CFLog(@"[ShortsFilter] overlay cls=%@", NSStringFromClass([overlay class]));
-                // YTIRenderer → reelPlayerOverlayRenderer を試す
-                NSArray *overlayKeys = @[
-                    @"reelPlayerOverlayRenderer",
-                    @"reelPlayerHeaderSupportedRenderers",
-                    @"channelNavigationEndpoint",
-                    @"browseEndpoint", @"browseId",
-                    @"channelId", @"avatar", @"title",
-                    @"channelName", @"authorText"
-                ];
-                for (NSString *ok2 in overlayKeys) {
-                    SEL osel = NSSelectorFromString(ok2);
-                    if ([overlay respondsToSelector:osel]) {
-                        #pragma clang diagnostic push
-                        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                        id oval = [overlay performSelector:osel];
-                        #pragma clang diagnostic pop
-                        CFLog(@"[ShortsFilter] overlay.%@=%@", ok2, NSStringFromClass([oval class]));
-                        if (oval) {
-                            NSString *ovDesc = [oval description];
-                            NSRegularExpression *rr = [NSRegularExpression
-                                regularExpressionWithPattern:@"UC[A-Za-z0-9_-]{22}"
-                                options:0 error:nil];
-                            NSTextCheckingResult *mm = [rr firstMatchInString:ovDesc
-                                options:0 range:NSMakeRange(0, ovDesc.length)];
-                            if (mm) {
-                                channelId = [ovDesc substringWithRange:mm.range];
-                                CFLog(@"[ShortsFilter] found in overlay.%@: %@", ok2, channelId);
-                                break;
-                            }
-                        }
-                    }
-                }
-                // overlay自体のdescription全文
-                if (!channelId) {
-                    NSString *overlayDesc = [overlay description];
-                    CFLog(@"[ShortsFilter] overlay desc: %@", overlayDesc);
-                }
-            }
-        }
-    }
-    CFLog(@"[ShortsFilter] after overlay: channelId=%@", channelId ?: @"nil");
 
-    // 3. reelEPのdescription全文をログに出す
-    if (!channelId) {
-        CFLog(@"[ShortsFilter] reelEP full desc: %@", [reelEP description]);
-    }
 
     if (!channelId) { CFLog(@"[ShortsFilter] channelId not found, skip"); return; }
     BOOL allowed = [wl isChannelAllowed:channelId];
