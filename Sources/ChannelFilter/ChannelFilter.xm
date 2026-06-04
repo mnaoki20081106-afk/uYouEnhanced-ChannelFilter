@@ -366,7 +366,7 @@ static UIImage *cf_stardyLogo(BOOL dark) {
     }
     CFLog(@"[ShortsFilter] from desc: channelId=%@", channelId ?: @"nil");
 
-    // 2. overlayから試す
+    // 2. overlayを深く掘る
     if (!channelId) {
         SEL overlaySel = NSSelectorFromString(@"overlay");
         if ([reelEP respondsToSelector:overlaySel]) {
@@ -375,32 +375,52 @@ static UIImage *cf_stardyLogo(BOOL dark) {
             id overlay = [reelEP performSelector:overlaySel];
             #pragma clang diagnostic pop
             if (overlay) {
-                NSString *overlayDesc = [overlay description];
-                CFLog(@"[ShortsFilter] overlay cls=%@ descLen=%lu",
-                      NSStringFromClass([overlay class]),
-                      (unsigned long)overlayDesc.length);
-                NSRegularExpression *regex2 = [NSRegularExpression
-                    regularExpressionWithPattern:@"UC[A-Za-z0-9_-]{22}"
-                    options:0 error:nil];
-                NSTextCheckingResult *m2 = [regex2 firstMatchInString:overlayDesc
-                    options:0 range:NSMakeRange(0, overlayDesc.length)];
-                if (m2) channelId = [overlayDesc substringWithRange:m2.range];
+                CFLog(@"[ShortsFilter] overlay cls=%@", NSStringFromClass([overlay class]));
+                // YTIRenderer → reelPlayerOverlayRenderer を試す
+                NSArray *overlayKeys = @[
+                    @"reelPlayerOverlayRenderer",
+                    @"reelPlayerHeaderSupportedRenderers",
+                    @"channelNavigationEndpoint",
+                    @"browseEndpoint", @"browseId",
+                    @"channelId", @"avatar", @"title",
+                    @"channelName", @"authorText"
+                ];
+                for (NSString *ok2 in overlayKeys) {
+                    SEL osel = NSSelectorFromString(ok2);
+                    if ([overlay respondsToSelector:osel]) {
+                        #pragma clang diagnostic push
+                        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                        id oval = [overlay performSelector:osel];
+                        #pragma clang diagnostic pop
+                        CFLog(@"[ShortsFilter] overlay.%@=%@", ok2, NSStringFromClass([oval class]));
+                        if (oval) {
+                            NSString *ovDesc = [oval description];
+                            NSRegularExpression *rr = [NSRegularExpression
+                                regularExpressionWithPattern:@"UC[A-Za-z0-9_-]{22}"
+                                options:0 error:nil];
+                            NSTextCheckingResult *mm = [rr firstMatchInString:ovDesc
+                                options:0 range:NSMakeRange(0, ovDesc.length)];
+                            if (mm) {
+                                channelId = [ovDesc substringWithRange:mm.range];
+                                CFLog(@"[ShortsFilter] found in overlay.%@: %@", ok2, channelId);
+                                break;
+                            }
+                        }
+                    }
+                }
+                // overlay自体のdescription全文
+                if (!channelId) {
+                    NSString *overlayDesc = [overlay description];
+                    CFLog(@"[ShortsFilter] overlay desc: %@", overlayDesc);
+                }
             }
         }
     }
     CFLog(@"[ShortsFilter] after overlay: channelId=%@", channelId ?: @"nil");
 
-    // 3. model全体のdescriptionから試す
+    // 3. reelEPのdescription全文をログに出す
     if (!channelId) {
-        NSString *modelDesc = [model description];
-        CFLog(@"[ShortsFilter] model desc len=%lu", (unsigned long)modelDesc.length);
-        NSRegularExpression *regex3 = [NSRegularExpression
-            regularExpressionWithPattern:@"UC[A-Za-z0-9_-]{22}"
-            options:0 error:nil];
-        NSTextCheckingResult *m3 = [regex3 firstMatchInString:modelDesc
-            options:0 range:NSMakeRange(0, modelDesc.length)];
-        if (m3) channelId = [modelDesc substringWithRange:m3.range];
-        CFLog(@"[ShortsFilter] from model desc: channelId=%@", channelId ?: @"nil");
+        CFLog(@"[ShortsFilter] reelEP full desc: %@", [reelEP description]);
     }
 
     if (!channelId) { CFLog(@"[ShortsFilter] channelId not found, skip"); return; }
