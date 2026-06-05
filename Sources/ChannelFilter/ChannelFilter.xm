@@ -408,38 +408,85 @@ static UIImage *cf_stardyLogo(BOOL dark) {
     if (!allowed && ![wl isEmpty]) {
         // ホワイトリスト外 → 次の動画へスキップ
         dispatch_async(dispatch_get_main_queue(), ^{
-            // YTAppReelWatchRootViewController を探して次へ進む
-            id target = s;
+            // VC chainを全て調べてログに出す（スキップセレクタ特定用）
             UIResponder *r = (UIResponder *)s;
+            id reelRoot = nil;
             while ((r = r.nextResponder)) {
                 NSString *cls = NSStringFromClass([r class]);
-                if ([cls containsString:@"ReelWatchRoot"] ||
-                    [cls containsString:@"ShortsSequence"] ||
-                    [cls containsString:@"AppReelWatch"]) {
-                    target = r;
-                    break;
+                if ([cls containsString:@"Reel"] || [cls containsString:@"Short"]) {
+                    CFLog(@"[ShortsFilter] chain: %@", cls);
+                    if (!reelRoot && ([cls containsString:@"Root"] ||
+                                      [cls containsString:@"Sequence"] ||
+                                      [cls containsString:@"Controller"])) {
+                        reelRoot = r;
+                    }
                 }
             }
-            // 次の動画へ進むセレクタを試す
-            NSArray *nextSelectors = @[@"advanceToNextItem",
-                                       @"skipToNextReel",
-                                       @"selectNextReel",
-                                       @"navigateToNextReel",
-                                       @"advanceToNextReel"];
+            // 全てのResponderに対してスキップセレクタを試す
+            NSArray *nextSelectors = @[
+                @"advanceToNextItem", @"skipToNextReel", @"selectNextReel",
+                @"navigateToNextReel", @"advanceToNextReel", @"swipeToNextReel",
+                @"scrollToNextItem", @"advanceToNextVideo", @"skipCurrentVideo",
+                @"goToNextReel", @"moveToNextReel", @"selectNextItem"
+            ];
+            id target = reelRoot ?: (id)s;
+            BOOL skipped = NO;
             for (NSString *selName in nextSelectors) {
                 SEL sel = NSSelectorFromString(selName);
                 if ([target respondsToSelector:sel]) {
-                    CFLog(@"[ShortsFilter] skipping via %@", selName);
+                    CFLog(@"[ShortsFilter] skipping via %@ on %@", selName, NSStringFromClass([target class]));
                     #pragma clang diagnostic push
                     #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
                     [target performSelector:sel];
                     #pragma clang diagnostic pop
-                    return;
+                    skipped = YES;
+                    break;
                 }
             }
-            // セレクタが見つからない場合は非表示にする
-            CFLog(@"[ShortsFilter] no skip selector found, hiding view");
-            [(UIView *)[(id)s view] setHidden:YES];
+            if (!skipped) {
+                // selfにも試す
+                for (NSString *selName in nextSelectors) {
+                    SEL sel = NSSelectorFromString(selName);
+                    if ([(id)s respondsToSelector:sel]) {
+                        CFLog(@"[ShortsFilter] skipping via %@ on self", selName);
+                        #pragma clang diagnostic push
+                        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                        [(id)s performSelector:sel];
+                        #pragma clang diagnostic pop
+                        skipped = YES;
+                        break;
+                    }
+                }
+            }
+            if (!skipped) {
+                CFLog(@"[ShortsFilter] no skip selector found");
+                // UISwipeGestureRecognizer で上スワイプをシミュレート
+                UIView *v = [(id)s view];
+                if (v) {
+                    // 上スワイプ（次の動画）をシミュレート
+                    CGPoint center = v.center;
+                    CGPoint start = CGPointMake(center.x, center.y + 100);
+                    CGPoint end = CGPointMake(center.x, center.y - 100);
+                    CFLog(@"[ShortsFilter] trying swipe simulation");
+                    // UIScrollViewを探して上スクロール
+                    UIResponder *sr = (UIResponder *)s;
+                    while ((sr = sr.nextResponder)) {
+                        if ([sr isKindOfClass:[UIScrollView class]]) {
+                            UIScrollView *sv = (UIScrollView *)sr;
+                            CFLog(@"[ShortsFilter] found scrollview: %@", NSStringFromClass([sv class]));
+                            CGPoint offset = sv.contentOffset;
+                            offset.y += sv.bounds.size.height;
+                            [sv setContentOffset:offset animated:YES];
+                            skipped = YES;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (!skipped) {
+                CFLog(@"[ShortsFilter] all methods failed, hiding view");
+                [(UIView *)[(id)s view] setHidden:YES];
+            }
         });
     }
 }
