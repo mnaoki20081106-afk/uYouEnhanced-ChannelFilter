@@ -463,11 +463,7 @@ static UIImage *cf_stardyLogo(BOOL dark) {
                 // UISwipeGestureRecognizer で上スワイプをシミュレート
                 UIView *v = [(id)s view];
                 if (v) {
-                    // 上スワイプ（次の動画）をシミュレート
-                    CGPoint center = v.center;
-                    CGPoint start = CGPointMake(center.x, center.y + 100);
-                    CGPoint end = CGPointMake(center.x, center.y - 100);
-                    CFLog(@"[ShortsFilter] trying swipe simulation");
+                    CFLog(@"[ShortsFilter] trying scrollview search");
                     // UIScrollViewを探して上スクロール
                     UIResponder *sr = (UIResponder *)s;
                     while ((sr = sr.nextResponder)) {
