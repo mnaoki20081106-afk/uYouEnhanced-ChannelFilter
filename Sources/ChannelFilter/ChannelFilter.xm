@@ -361,51 +361,10 @@ static id cf_reelEPFromModel(id model) {
 
 %hook YTShortsPlayerViewController
 - (void)viewWillAppear:(BOOL)animated {
-    CFWhitelistManager *wl = [CFWhitelistManager sharedManager];
-    if (![wl isEmpty]) {
-        id s = (id)self;
-        SEL modelSel = NSSelectorFromString(@"model");
-        if ([s respondsToSelector:modelSel]) {
-            #pragma clang diagnostic push
-            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-            id model = [s performSelector:modelSel];
-            #pragma clang diagnostic pop
-            id reelEP = cf_reelEPFromModel(model);
-            NSString *channelId = cf_channelIdFromReelEP(reelEP);
-            // channelIdがnil（paramsなし）またはホワイトリスト外 → スキップ
-            BOOL shouldSkip = !channelId || ![wl isChannelAllowed:channelId];
-            CFLog(@"[ShortsFilter] viewWillAppear channelId=%@ shouldSkip=%d",
-                  channelId ?: @"nil", (int)shouldSkip);
-            if (shouldSkip) {
-                // viewWillAppearの時点でYTAsyncCollectionViewを探して次へスクロール
-                UIResponder *r = (UIResponder *)s;
-                while ((r = r.nextResponder)) {
-                    if ([r isKindOfClass:NSClassFromString(@"YTAsyncCollectionView")]) {
-                        UICollectionView *cv = (UICollectionView *)r;
-                        NSIndexPath *next = [NSIndexPath indexPathForItem:1 inSection:0];
-                        if ([cv numberOfItemsInSection:0] > 1) {
-                            [cv scrollToItemAtIndexPath:next
-                                      atScrollPosition:UICollectionViewScrollPositionCenteredVertically
-                                              animated:NO];
-                            CFLog(@"[ShortsFilter] scrolled to next item");
-                        }
-                        break;
-                    }
-                }
-                // viewを非表示にして視覚的にも隠す
-                [(UIView *)[(id)s view] setAlpha:0.0];
-                return;
-            }
-        }
-    }
-    %orig;
-}
-
-- (void)viewDidAppear:(BOOL)animated {
-    %orig;
-    // 表示されたVCのalphaを1に戻す（allowedの場合）
+    %orig; // 必ず呼んでVC初期化を行う
     CFWhitelistManager *wl = [CFWhitelistManager sharedManager];
     if ([wl isEmpty]) return;
+
     id s = (id)self;
     SEL modelSel = NSSelectorFromString(@"model");
     if (![s respondsToSelector:modelSel]) return;
@@ -415,8 +374,36 @@ static id cf_reelEPFromModel(id model) {
     #pragma clang diagnostic pop
     id reelEP = cf_reelEPFromModel(model);
     NSString *channelId = cf_channelIdFromReelEP(reelEP);
-    if (channelId && [wl isChannelAllowed:channelId]) {
-        [(UIView *)[(id)s view] setAlpha:1.0];
+    BOOL shouldSkip = !channelId || ![wl isChannelAllowed:channelId];
+    CFLog(@"[ShortsFilter] channelId=%@ shouldSkip=%d", channelId ?: @"nil", (int)shouldSkip);
+
+    if (shouldSkip) {
+        // alpha=0で視覚的に隠す
+        [(UIView *)[(id)s view] setAlpha:0.0];
+        // YTAsyncCollectionViewを探して次へスクロール
+        dispatch_async(dispatch_get_main_queue(), ^{
+            UIResponder *r = (UIResponder *)s;
+            while ((r = r.nextResponder)) {
+                if ([r isKindOfClass:NSClassFromString(@"YTAsyncCollectionView")]) {
+                    UICollectionView *cv = (UICollectionView *)r;
+                    // 現在表示中のindexPathを取得して次へ
+                    NSArray *visible = [cv indexPathsForVisibleItems];
+                    if (visible.count > 0) {
+                        NSIndexPath *current = visible[0];
+                        NSInteger nextItem = current.item + 1;
+                        NSInteger total = [cv numberOfItemsInSection:0];
+                        if (nextItem < total) {
+                            NSIndexPath *next = [NSIndexPath indexPathForItem:nextItem inSection:0];
+                            [cv scrollToItemAtIndexPath:next
+                                      atScrollPosition:UICollectionViewScrollPositionCenteredVertically
+                                              animated:NO];
+                            CFLog(@"[ShortsFilter] scrolled %ld -> %ld", (long)current.item, (long)nextItem);
+                        }
+                    }
+                    break;
+                }
+            }
+        });
     }
 }
 %end
