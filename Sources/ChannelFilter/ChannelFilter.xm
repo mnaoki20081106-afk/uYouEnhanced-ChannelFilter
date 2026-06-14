@@ -556,6 +556,13 @@ didUpdateWithPrevItems:(NSArray *)prevItems
         browseEP = [endpoint performSelector:@selector(browseEndpoint)];
         #pragma clang diagnostic pop
     }
+    // browseEndpoint がない = 検索タブ等 → 登録タブフラグをリセット
+    if (!browseEP) {
+        [[NSUserDefaults standardUserDefaults] setBool:NO forKey:@"cf_is_subscription_tab"];
+        [[NSUserDefaults standardUserDefaults] synchronize];
+        CFLog(@"[Endpoint] no browseEP -> FLAG OFF (search/other)");
+        return;
+    }
     NSString *browseId = nil;
     if ([browseEP respondsToSelector:@selector(browseId)]) {
         #pragma clang diagnostic push
@@ -591,6 +598,12 @@ didUpdateWithPrevItems:(NSArray *)prevItems
         #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
         browseEP = [endpoint performSelector:@selector(browseEndpoint)];
         #pragma clang diagnostic pop
+    }
+    // browseEndpoint なし = 検索タブ等 → 登録タブフラグをリセット
+    if (!browseEP) {
+        [[NSUserDefaults standardUserDefaults] setBool:NO forKey:@"cf_is_subscription_tab"];
+        [[NSUserDefaults standardUserDefaults] synchronize];
+        return;
     }
     NSString *browseId = nil;
     if ([browseEP respondsToSelector:@selector(browseId)]) {
@@ -968,6 +981,85 @@ didUpdateWithPrevItems:(NSArray *)prevItems
     if (isSubscriptionFeed && channelIdsForSync.count > 0) {
         [wl syncSubscribedChannelIDs:channelIdsForSync];
     }
+}
+
+// ─── addSection: (単数形) フック ─────────────────────────────────────────────
+// 検索結果は addSectionsFromArray: ではなく addSection: で1件ずつ追加される可能性がある。
+// 同じフィルタリングロジックを適用する。
+- (void)addSection:(id)section {
+    CFWhitelistManager *wl = [CFWhitelistManager sharedManager];
+    BOOL isSubscriptionFeed = [[NSUserDefaults standardUserDefaults]
+        boolForKey:@"cf_is_subscription_tab"];
+    BOOL shouldFilter = !isSubscriptionFeed && ![wl isEmpty];
+
+    id s = (id)self;
+    NSString *vcClass = NSStringFromClass([s class]);
+    CFLog(@"[Search-single] vcClass=%@ shouldFilter=%d", vcClass, (int)shouldFilter);
+
+    if (!shouldFilter) { %orig; return; }
+
+    NSString *secClass = NSStringFromClass([section class]);
+
+    // FilterChip / ChipBar はフィルタリング対象外（検索結果上部のチップ等）
+    if ([secClass containsString:@"FilterChip"] ||
+        [secClass containsString:@"ChipBar"])    { %orig; return; }
+
+    // ShelfRenderer はセクションごと除去
+    if ([secClass isEqualToString:@"YTIShelfRenderer"] ||
+        [secClass containsString:@"ShelfRenderer"]) {
+        CFLog(@"[Search-single] Shelf removed cls=%@", secClass);
+        return;
+    }
+
+    if (![section respondsToSelector:@selector(contentsArray)]) { %orig; return; }
+    #pragma clang diagnostic push
+    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+    NSArray *items = [section performSelector:@selector(contentsArray)];
+    #pragma clang diagnostic pop
+    if (!items.count) { %orig; return; }
+
+    NSMutableIndexSet *toRemove = [NSMutableIndexSet indexSet];
+    for (NSUInteger ii = 0; ii < items.count; ii++) {
+        id item = items[ii];
+        if (![item respondsToSelector:@selector(elementRenderer)]) continue;
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        id elemRenderer = [item performSelector:@selector(elementRenderer)];
+        #pragma clang diagnostic pop
+        if (!elemRenderer || ![elemRenderer respondsToSelector:@selector(elementData)]) continue;
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        id elemData = [elemRenderer performSelector:@selector(elementData)];
+        #pragma clang diagnostic pop
+        if (!elemData || ![elemData isKindOfClass:[NSData class]]) continue;
+
+        NSString *channelId = cf_extractChannelId((NSData *)elemData);
+        if (!channelId.length || ![wl isChannelAllowed:channelId]) {
+            [toRemove addIndex:ii];
+            if (channelId.length) CFLog(@"[Search-single] excluded ch=%@", channelId);
+        }
+    }
+
+    // 全アイテムが除外対象 → セクション追加自体をキャンセル
+    if (toRemove.count == items.count) {
+        CFLog(@"[Search-single] all %lu items excluded, skip addSection",
+              (unsigned long)items.count);
+        return;
+    }
+
+    if (toRemove.count > 0) {
+        NSMutableArray *filtered = [items mutableCopy];
+        [filtered removeObjectsAtIndexes:toRemove];
+        if ([section respondsToSelector:@selector(setContentsArray:)]) {
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            [section performSelector:@selector(setContentsArray:) withObject:filtered];
+            #pragma clang diagnostic pop
+        }
+        CFLog(@"[Search-single] %lu -> %lu items",
+              (unsigned long)items.count, (unsigned long)filtered.count);
+    }
+    %orig;
 }
 %end
 
