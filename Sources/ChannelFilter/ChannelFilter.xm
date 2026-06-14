@@ -338,10 +338,9 @@ static NSString *cf_channelIdFromReelEP(id reelEP) {
     if (!decoded) return nil;
     NSString *str = [[NSString alloc] initWithData:decoded encoding:NSISOLatin1StringEncoding];
     if (!str) return nil;
-    NSRegularExpression *regex = [NSRegularExpression
-        regularExpressionWithPattern:@"UC[A-Za-z0-9_-]{22}" options:0 error:nil];
-    NSTextCheckingResult *match = [regex firstMatchInString:str
-        options:0 range:NSMakeRange(0, str.length)];
+    // cf_channelIdRegex() は dispatch_once でキャッシュ済み → 毎回コンパイル不要
+    NSTextCheckingResult *match = [cf_channelIdRegex()
+        firstMatchInString:str options:0 range:NSMakeRange(0, str.length)];
     if (!match) return nil;
     return [str substringWithRange:match.range];
 }
