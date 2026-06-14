@@ -311,19 +311,14 @@ static UIImage *cf_stardyLogo(BOOL dark) {
 
 // ─── ショートタブ フィルター（Model層フック）────────────────────────────────
 //
-//  方針: UI描画後にスキップするのではなく、
-//        データがVCに渡される前に配列から除外する。
+//  フック対象: YTReelWatchRootViewController（親クラス）
+//    → YTAppReelWatchRootViewController にも自動適用される
 //
-//  【フェーズ1: 調査】
-//    YTAppReelWatchRootViewController / YTReelWatchRootViewController に
-//    どのメソッドでモデル配列が渡されるかを CF Logs でダンプして特定する。
-//    候補: setModels: / setItems: / setEntries: / updateModels: 等
+//  メイン:    dataSource:didUpdateWithPrevItems:nextItems:refreshItems:
+//    APIレスポンスがシーケンサーに渡る直前。prev/next/refreshの3配列をまとめて除外。
 //
-//  【フェーズ2: 本実装】（ログでメソッド名が判明したら書き換える）
-//    判明したメソッドをフックし、%orig に渡す前に
-//    cf_channelIdFromReelEP() でフィルタリングした配列を渡す。
-//
-//  ※ cf_channelIdFromReelEP / cf_reelEPFromModel は引き続き使用するため残す
+//  バックアップ: addReelContentModels:toPlayerSequencerItems:
+//    追加ロード時にシーケンサーへ追加される直前。上記をすり抜けた場合のセーフネット。
 
 // ヘルパー: YTReelWatchEndpointのparamsからchannelIdを取得
 static NSString *cf_channelIdFromReelEP(id reelEP) {
@@ -370,161 +365,87 @@ static id cf_reelEPFromModel(id model) {
     return reelEP;
 }
 
-// ─── ヘルパー: モデル1件からchannelIdを取得（フィルタリング共通処理） ──────
-// model は YTReelModel 相当。endpoint→reelWatchEndpoint→params の経路で抽出。
+// ヘルパー: YTReelModelからchannelIdを取得
 static NSString *cf_channelIdFromShortsModel(id model) {
     return cf_channelIdFromReelEP(cf_reelEPFromModel(model));
 }
 
-// ─── ヘルパー: クラスの全メソッドをダンプしてCFLogに出力（調査用・1回のみ） ─
-static void cf_dumpMethods(Class cls, NSString *tag) {
-    if (!cls) return;
-    unsigned int count = 0;
-    Method *methods = class_copyMethodList(cls, &count);
-    CFLog(@"[%@] === method dump: %@ count=%u ===", tag, NSStringFromClass(cls), count);
-    for (unsigned int i = 0; i < count; i++) {
-        NSString *selName = NSStringFromSelector(method_getName(methods[i]));
-        // 引数にNSArray/NSOrderedSet等を取りそうなものを抽出
-        if ([selName containsString:@"odel"]   || // setModels:/updateModels:
-            [selName containsString:@"tem"]    || // setItems:/addItems:
-            [selName containsString:@"ntry"]   || // setEntries:
-            [selName containsString:@"eel"]    || // reel系
-            [selName containsString:@"ppend"]  || // appendModels:
-            [selName containsString:@"nsert"]  || // insertModels:
-            [selName containsString:@"atch"]   || // batch系
-            [selName containsString:@"ontent"] || // setContents:
-            [selName containsString:@"eload"]  || // reload系
-            [selName containsString:@"eed"]) {    // feed系
-            CFLog(@"[%@] candidate: %@", tag, selName);
+// ヘルパー: YTReelModel配列をホワイトリストでフィルタリングして返す
+// channelIdが取得できないモデル（広告・非ショート）は除外する
+static NSArray *cf_filterReelModels(NSArray *models, CFWhitelistManager *wl) {
+    if (!models.count) return models;
+    NSMutableArray *filtered = [NSMutableArray arrayWithCapacity:models.count];
+    for (id model in models) {
+        NSString *channelId = cf_channelIdFromShortsModel(model);
+        if (!channelId) {
+            // channelId取得不可 = 広告またはデータ構造が異なるモデル → 除外
+            CFLog(@"[ShortsFilter] no channelId, skip model=%@",
+                  NSStringFromClass([model class]));
+            continue;
+        }
+        if ([wl isChannelAllowed:channelId]) {
+            [filtered addObject:model];
+        } else {
+            CFLog(@"[ShortsFilter] excluded ch=%@", channelId);
         }
     }
-    free(methods);
+    return [filtered copy];
 }
 
-// ─── フェーズ1: YTAppReelWatchRootViewController のメソッドダンプ ─────────
-// ショートタブが開かれたとき、統括VCに対して1回だけダンプを実行する。
-// ログで "candidate:" の行が出たら、その中からモデル配列を受け取る
-// メソッド名を特定し、フェーズ2のフックに書き換える。
+// 前方宣言
+@interface YTReelWatchRootViewController : UIViewController
+@end
 @interface YTAppReelWatchRootViewController : UIViewController
 @end
 
-%hook YTAppReelWatchRootViewController
-- (void)viewDidLoad {
-    %orig;
-    static BOOL _dumped = NO;
-    if (_dumped) return;
-    _dumped = YES;
-    id s = (id)self;
-    // 自クラスと親クラス2段階をダンプ（メソッドが親クラスに定義されていることがある）
-    cf_dumpMethods([s class], @"ReelRoot");
-    cf_dumpMethods(class_getSuperclass([s class]), @"ReelRoot-super");
-    CFLog(@"[ReelRoot] viewDidLoad done, class=%@", NSStringFromClass([s class]));
-}
-
-// setModels: 系のメソッドが存在する場合の観測フック群
-// ─ 実際に呼ばれたらログに出る。呼ばれなければ別メソッドを探す手がかりになる。
-%new - (void)cf_probe_setModels:(id)arg {
-    CFLog(@"[ReelRoot] cf_probe_setModels: called arg=%@ class=%@",
-          NSStringFromClass([arg class]),
-          ([arg respondsToSelector:@selector(count)] ?
-           [NSString stringWithFormat:@"count=%lu", (unsigned long)[arg performSelector:@selector(count)]] : @"?"));
-}
-%end
-
-// ─── フェーズ1: YTReelWatchRootViewController（別名の可能性） ───────────────
-@interface YTReelWatchRootViewController : UIViewController
-@end
-
+// ─── メインフック: データソース → シーケンサー ────────────────────────────
+// YTReelWatchRootViewController（親クラス）をフックすることで
+// YTAppReelWatchRootViewController にも自動適用される。
+//
+// このメソッドはAPIレスポンスを受けたデータソースが、
+// prev/next/refresh の3方向のモデル配列を一括でシーケンサーに渡す地点。
+// ここで除外したモデルはシーケンサーに登録されず、UIに描画されない。
 %hook YTReelWatchRootViewController
-- (void)viewDidLoad {
-    %orig;
-    static BOOL _dumped = NO;
-    if (_dumped) return;
-    _dumped = YES;
-    id s = (id)self;
-    cf_dumpMethods([s class], @"ReelWatchRoot");
-    cf_dumpMethods(class_getSuperclass([s class]), @"ReelWatchRoot-super");
-    CFLog(@"[ReelWatchRoot] viewDidLoad done, class=%@", NSStringFromClass([s class]));
-}
-%end
-
-// ─── フェーズ1: YTShortsPlayerViewController でモデルの構造を観測 ────────────
-// 既存の channelId 抽出ロジックが正常に動くかを確認し、
-// 同時にモデルクラス名を記録する（フェーズ2のフック対象特定に使う）。
-@interface YTShortsPlayerViewController : UIViewController
-@end
-
-%hook YTShortsPlayerViewController
-- (void)viewWillAppear:(BOOL)animated {
-    %orig;
-    id s = (id)self;
-    SEL modelSel = NSSelectorFromString(@"model");
-    if (![s respondsToSelector:modelSel]) {
-        CFLog(@"[ShortsPlayer] no 'model' selector");
+- (void)dataSource:(id)dataSource
+didUpdateWithPrevItems:(NSArray *)prevItems
+         nextItems:(NSArray *)nextItems
+      refreshItems:(NSArray *)refreshItems {
+    CFWhitelistManager *wl = [CFWhitelistManager sharedManager];
+    if ([wl isEmpty]) {
+        %orig;
         return;
     }
-    #pragma clang diagnostic push
-    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-    id model = [s performSelector:modelSel];
-    #pragma clang diagnostic pop
-    if (!model) { CFLog(@"[ShortsPlayer] model is nil"); return; }
 
-    // モデルのクラス名をログ（フェーズ2でこのクラスをフックする候補）
-    static BOOL _modelClassDumped = NO;
-    if (!_modelClassDumped) {
-        _modelClassDumped = YES;
-        cf_dumpMethods([model class], @"ReelModel");
-        cf_dumpMethods(class_getSuperclass([model class]), @"ReelModel-super");
-    }
+    NSArray *filteredPrev    = cf_filterReelModels(prevItems,    wl);
+    NSArray *filteredNext    = cf_filterReelModels(nextItems,    wl);
+    NSArray *filteredRefresh = cf_filterReelModels(refreshItems, wl);
 
-    NSString *channelId = cf_channelIdFromShortsModel(model);
-    CFLog(@"[ShortsPlayer] viewWillAppear channelId=%@ modelClass=%@",
-          channelId ?: @"(nil)", NSStringFromClass([model class]));
+    CFLog(@"[ShortsFilter] dataSource:didUpdate prev=%lu->%lu next=%lu->%lu refresh=%lu->%lu",
+          (unsigned long)prevItems.count,    (unsigned long)filteredPrev.count,
+          (unsigned long)nextItems.count,    (unsigned long)filteredNext.count,
+          (unsigned long)refreshItems.count, (unsigned long)filteredRefresh.count);
 
-    // ホワイトリストが空なら何もしない（通常フロー）
+    %orig(dataSource, filteredPrev, filteredNext, filteredRefresh);
+}
+
+// ─── バックアップフック: シーケンサーへの追加時 ──────────────────────────
+// 追加ロード（スクロールで続きを読み込む時）に呼ばれる。
+// dataSource:didUpdate... をすり抜けた場合のセーフネット。
+- (void)addReelContentModels:(NSArray *)models
+       toPlayerSequencerItems:(NSMutableArray *)sequencerItems {
     CFWhitelistManager *wl = [CFWhitelistManager sharedManager];
-    if ([wl isEmpty]) return;
-
-    // フェーズ2実装後はここでフィルタリングは不要になる予定。
-    // 念のため現時点でのchannelId確認のみ行い、表示はすべてそのままにする。
-    if (channelId) {
-        BOOL allowed = [wl isChannelAllowed:channelId];
-        CFLog(@"[ShortsPlayer] allowed=%d ch=%@", (int)allowed, channelId);
+    if ([wl isEmpty]) {
+        %orig;
+        return;
     }
+
+    NSArray *filtered = cf_filterReelModels(models, wl);
+    CFLog(@"[ShortsFilter] addReelContentModels: %lu -> %lu",
+          (unsigned long)models.count, (unsigned long)filtered.count);
+
+    %orig(filtered, sequencerItems);
 }
 %end
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 【フェーズ2: 本実装テンプレート】
-//   上記ダンプで "candidate:" として出たメソッド名（例: setModels:）が
-//   判明したら、下記のコメントアウトを解除・書き換えて使う。
-//
-//   モデル配列を受け取るメソッド名を HOOK_METHOD_NAME に当てはめる:
-//
-// @interface YTAppReelWatchRootViewController (CFFilter)
-// @end
-//
-// %hook YTAppReelWatchRootViewController
-// - (void)HOOK_METHOD_NAME:(NSArray *)models {
-//     CFWhitelistManager *wl = [CFWhitelistManager sharedManager];
-//     if ([wl isEmpty]) { %orig; return; }
-//
-//     NSMutableArray *filtered = [NSMutableArray arrayWithCapacity:models.count];
-//     for (id model in models) {
-//         NSString *channelId = cf_channelIdFromShortsModel(model);
-//         if (!channelId) { continue; } // channelId取得不可 = 除外
-//         if ([wl isChannelAllowed:channelId]) {
-//             [filtered addObject:model];
-//         } else {
-//             CFLog(@"[ShortsFilter] excluded: %@", channelId);
-//         }
-//     }
-//     CFLog(@"[ShortsFilter] HOOK_METHOD_NAME: %lu -> %lu",
-//           (unsigned long)models.count, (unsigned long)filtered.count);
-//     %orig(filtered);
-// }
-// %end
-// ─────────────────────────────────────────────────────────────────────────────
 
 // ─── タブバー判定（iPhone対応） ──────────────────────────────────────────────
 @interface YTPivotBarViewController : UIViewController
