@@ -309,10 +309,21 @@ static UIImage *cf_stardyLogo(BOOL dark) {
                          orientation:UIImageOrientationUp];
 }
 
-// ─── ショートタブ フィルター ─────────────────────────────────────────────────
-// YTShortsPlayerViewController: 1ショート動画を表示するVC
-@interface YTShortsPlayerViewController : UIViewController
-@end
+// ─── ショートタブ フィルター（Model層フック）────────────────────────────────
+//
+//  方針: UI描画後にスキップするのではなく、
+//        データがVCに渡される前に配列から除外する。
+//
+//  【フェーズ1: 調査】
+//    YTAppReelWatchRootViewController / YTReelWatchRootViewController に
+//    どのメソッドでモデル配列が渡されるかを CF Logs でダンプして特定する。
+//    候補: setModels: / setItems: / setEntries: / updateModels: 等
+//
+//  【フェーズ2: 本実装】（ログでメソッド名が判明したら書き換える）
+//    判明したメソッドをフックし、%orig に渡す前に
+//    cf_channelIdFromReelEP() でフィルタリングした配列を渡す。
+//
+//  ※ cf_channelIdFromReelEP / cf_reelEPFromModel は引き続き使用するため残す
 
 // ヘルパー: YTReelWatchEndpointのparamsからchannelIdを取得
 static NSString *cf_channelIdFromReelEP(id reelEP) {
@@ -340,7 +351,7 @@ static NSString *cf_channelIdFromReelEP(id reelEP) {
     return [str substringWithRange:match.range];
 }
 
-// ヘルパー: YTReelModelからreelEPを取得
+// ヘルパー: YTReelModelからreelWatchEndpointを取得
 static id cf_reelEPFromModel(id model) {
     if (!model) return nil;
     SEL epSel = NSSelectorFromString(@"endpoint");
@@ -359,54 +370,161 @@ static id cf_reelEPFromModel(id model) {
     return reelEP;
 }
 
+// ─── ヘルパー: モデル1件からchannelIdを取得（フィルタリング共通処理） ──────
+// model は YTReelModel 相当。endpoint→reelWatchEndpoint→params の経路で抽出。
+static NSString *cf_channelIdFromShortsModel(id model) {
+    return cf_channelIdFromReelEP(cf_reelEPFromModel(model));
+}
+
+// ─── ヘルパー: クラスの全メソッドをダンプしてCFLogに出力（調査用・1回のみ） ─
+static void cf_dumpMethods(Class cls, NSString *tag) {
+    if (!cls) return;
+    unsigned int count = 0;
+    Method *methods = class_copyMethodList(cls, &count);
+    CFLog(@"[%@] === method dump: %@ count=%u ===", tag, NSStringFromClass(cls), count);
+    for (unsigned int i = 0; i < count; i++) {
+        NSString *selName = NSStringFromSelector(method_getName(methods[i]));
+        // 引数にNSArray/NSOrderedSet等を取りそうなものを抽出
+        if ([selName containsString:@"odel"]   || // setModels:/updateModels:
+            [selName containsString:@"tem"]    || // setItems:/addItems:
+            [selName containsString:@"ntry"]   || // setEntries:
+            [selName containsString:@"eel"]    || // reel系
+            [selName containsString:@"ppend"]  || // appendModels:
+            [selName containsString:@"nsert"]  || // insertModels:
+            [selName containsString:@"atch"]   || // batch系
+            [selName containsString:@"ontent"] || // setContents:
+            [selName containsString:@"eload"]  || // reload系
+            [selName containsString:@"eed"]) {    // feed系
+            CFLog(@"[%@] candidate: %@", tag, selName);
+        }
+    }
+    free(methods);
+}
+
+// ─── フェーズ1: YTAppReelWatchRootViewController のメソッドダンプ ─────────
+// ショートタブが開かれたとき、統括VCに対して1回だけダンプを実行する。
+// ログで "candidate:" の行が出たら、その中からモデル配列を受け取る
+// メソッド名を特定し、フェーズ2のフックに書き換える。
+@interface YTAppReelWatchRootViewController : UIViewController
+@end
+
+%hook YTAppReelWatchRootViewController
+- (void)viewDidLoad {
+    %orig;
+    static BOOL _dumped = NO;
+    if (_dumped) return;
+    _dumped = YES;
+    id s = (id)self;
+    // 自クラスと親クラス2段階をダンプ（メソッドが親クラスに定義されていることがある）
+    cf_dumpMethods([s class], @"ReelRoot");
+    cf_dumpMethods(class_getSuperclass([s class]), @"ReelRoot-super");
+    CFLog(@"[ReelRoot] viewDidLoad done, class=%@", NSStringFromClass([s class]));
+}
+
+// setModels: 系のメソッドが存在する場合の観測フック群
+// ─ 実際に呼ばれたらログに出る。呼ばれなければ別メソッドを探す手がかりになる。
+%new - (void)cf_probe_setModels:(id)arg {
+    CFLog(@"[ReelRoot] cf_probe_setModels: called arg=%@ class=%@",
+          NSStringFromClass([arg class]),
+          ([arg respondsToSelector:@selector(count)] ?
+           [NSString stringWithFormat:@"count=%lu", (unsigned long)[arg performSelector:@selector(count)]] : @"?"));
+}
+%end
+
+// ─── フェーズ1: YTReelWatchRootViewController（別名の可能性） ───────────────
+@interface YTReelWatchRootViewController : UIViewController
+@end
+
+%hook YTReelWatchRootViewController
+- (void)viewDidLoad {
+    %orig;
+    static BOOL _dumped = NO;
+    if (_dumped) return;
+    _dumped = YES;
+    id s = (id)self;
+    cf_dumpMethods([s class], @"ReelWatchRoot");
+    cf_dumpMethods(class_getSuperclass([s class]), @"ReelWatchRoot-super");
+    CFLog(@"[ReelWatchRoot] viewDidLoad done, class=%@", NSStringFromClass([s class]));
+}
+%end
+
+// ─── フェーズ1: YTShortsPlayerViewController でモデルの構造を観測 ────────────
+// 既存の channelId 抽出ロジックが正常に動くかを確認し、
+// 同時にモデルクラス名を記録する（フェーズ2のフック対象特定に使う）。
+@interface YTShortsPlayerViewController : UIViewController
+@end
+
 %hook YTShortsPlayerViewController
 - (void)viewWillAppear:(BOOL)animated {
-    %orig; // 必ず呼んでVC初期化を行う
-    CFWhitelistManager *wl = [CFWhitelistManager sharedManager];
-    if ([wl isEmpty]) return;
-
+    %orig;
     id s = (id)self;
     SEL modelSel = NSSelectorFromString(@"model");
-    if (![s respondsToSelector:modelSel]) return;
+    if (![s respondsToSelector:modelSel]) {
+        CFLog(@"[ShortsPlayer] no 'model' selector");
+        return;
+    }
     #pragma clang diagnostic push
     #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
     id model = [s performSelector:modelSel];
     #pragma clang diagnostic pop
-    id reelEP = cf_reelEPFromModel(model);
-    NSString *channelId = cf_channelIdFromReelEP(reelEP);
-    BOOL shouldSkip = !channelId || ![wl isChannelAllowed:channelId];
-    CFLog(@"[ShortsFilter] channelId=%@ shouldSkip=%d", channelId ?: @"nil", (int)shouldSkip);
+    if (!model) { CFLog(@"[ShortsPlayer] model is nil"); return; }
 
-    if (shouldSkip) {
-        // alpha=0で視覚的に隠す
-        [(UIView *)[(id)s view] setAlpha:0.0];
-        // YTAsyncCollectionViewを探して次へスクロール
-        dispatch_async(dispatch_get_main_queue(), ^{
-            UIResponder *r = (UIResponder *)s;
-            while ((r = r.nextResponder)) {
-                if ([r isKindOfClass:NSClassFromString(@"YTAsyncCollectionView")]) {
-                    UICollectionView *cv = (UICollectionView *)r;
-                    // 現在表示中のindexPathを取得して次へ
-                    NSArray *visible = [cv indexPathsForVisibleItems];
-                    if (visible.count > 0) {
-                        NSIndexPath *current = visible[0];
-                        NSInteger nextItem = current.item + 1;
-                        NSInteger total = [cv numberOfItemsInSection:0];
-                        if (nextItem < total) {
-                            NSIndexPath *next = [NSIndexPath indexPathForItem:nextItem inSection:0];
-                            [cv scrollToItemAtIndexPath:next
-                                      atScrollPosition:UICollectionViewScrollPositionCenteredVertically
-                                              animated:NO];
-                            CFLog(@"[ShortsFilter] scrolled %ld -> %ld", (long)current.item, (long)nextItem);
-                        }
-                    }
-                    break;
-                }
-            }
-        });
+    // モデルのクラス名をログ（フェーズ2でこのクラスをフックする候補）
+    static BOOL _modelClassDumped = NO;
+    if (!_modelClassDumped) {
+        _modelClassDumped = YES;
+        cf_dumpMethods([model class], @"ReelModel");
+        cf_dumpMethods(class_getSuperclass([model class]), @"ReelModel-super");
+    }
+
+    NSString *channelId = cf_channelIdFromShortsModel(model);
+    CFLog(@"[ShortsPlayer] viewWillAppear channelId=%@ modelClass=%@",
+          channelId ?: @"(nil)", NSStringFromClass([model class]));
+
+    // ホワイトリストが空なら何もしない（通常フロー）
+    CFWhitelistManager *wl = [CFWhitelistManager sharedManager];
+    if ([wl isEmpty]) return;
+
+    // フェーズ2実装後はここでフィルタリングは不要になる予定。
+    // 念のため現時点でのchannelId確認のみ行い、表示はすべてそのままにする。
+    if (channelId) {
+        BOOL allowed = [wl isChannelAllowed:channelId];
+        CFLog(@"[ShortsPlayer] allowed=%d ch=%@", (int)allowed, channelId);
     }
 }
 %end
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 【フェーズ2: 本実装テンプレート】
+//   上記ダンプで "candidate:" として出たメソッド名（例: setModels:）が
+//   判明したら、下記のコメントアウトを解除・書き換えて使う。
+//
+//   モデル配列を受け取るメソッド名を HOOK_METHOD_NAME に当てはめる:
+//
+// @interface YTAppReelWatchRootViewController (CFFilter)
+// @end
+//
+// %hook YTAppReelWatchRootViewController
+// - (void)HOOK_METHOD_NAME:(NSArray *)models {
+//     CFWhitelistManager *wl = [CFWhitelistManager sharedManager];
+//     if ([wl isEmpty]) { %orig; return; }
+//
+//     NSMutableArray *filtered = [NSMutableArray arrayWithCapacity:models.count];
+//     for (id model in models) {
+//         NSString *channelId = cf_channelIdFromShortsModel(model);
+//         if (!channelId) { continue; } // channelId取得不可 = 除外
+//         if ([wl isChannelAllowed:channelId]) {
+//             [filtered addObject:model];
+//         } else {
+//             CFLog(@"[ShortsFilter] excluded: %@", channelId);
+//         }
+//     }
+//     CFLog(@"[ShortsFilter] HOOK_METHOD_NAME: %lu -> %lu",
+//           (unsigned long)models.count, (unsigned long)filtered.count);
+//     %orig(filtered);
+// }
+// %end
+// ─────────────────────────────────────────────────────────────────────────────
 
 // ─── タブバー判定（iPhone対応） ──────────────────────────────────────────────
 @interface YTPivotBarViewController : UIViewController
@@ -969,6 +1087,29 @@ compatibleWithTraitCollection:(UITraitCollection *)tc {
         UIImage *i = cf_stardyLogo(NO); if (i) return i;
     }
     // Shortsロゴ置き換え（CF Logで判明した画像名）
+    if ([name isEqualToString:@"youtube_shorts_24_cairo"] ||
+        [name isEqualToString:@"youtube_outline_experimental/shorts_24pt"] ||
+        [name isEqualToString:@"youtube_fill_experimental/shorts_24pt"] ||
+        [name isEqualToString:@"ic_shorts_logo"] ||
+        [name isEqualToString:@"youtube_shorts_logo"] ||
+        [name isEqualToString:@"shorts_logo"] ||
+        [name isEqualToString:@"reel_logo"]) {
+        UIImage *i = cf_shortsLogo(); if (i) return i;
+    }
+    return %orig;
+}
++ (UIImage *)imageNamed:(NSString *)name
+                inBundle:(NSBundle *)bundle {
+    // 一部のシステム/新タブ経路は2引数版(inBundle:のみ)を使うことがある。
+    // 同じ判定ロジックをここにも適用する。
+    if ([name isEqualToString:@"youtube_logo_dark_cairo"] ||
+        [name isEqualToString:@"youtube_premium_logo_dark_cairo"]) {
+        UIImage *i = cf_stardyLogo(YES); if (i) return i;
+    }
+    if ([name isEqualToString:@"youtube_premium_badge_light"] ||
+        [name isEqualToString:@"youtube_premium_standalone_cairo"]) {
+        UIImage *i = cf_stardyLogo(NO); if (i) return i;
+    }
     if ([name isEqualToString:@"youtube_shorts_24_cairo"] ||
         [name isEqualToString:@"youtube_outline_experimental/shorts_24pt"] ||
         [name isEqualToString:@"youtube_fill_experimental/shorts_24pt"] ||
