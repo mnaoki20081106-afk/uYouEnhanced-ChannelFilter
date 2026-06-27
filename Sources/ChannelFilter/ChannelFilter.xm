@@ -105,13 +105,25 @@ static void CFLog(NSString *format, ...) {
 }
 @end
 
+// ─── メインウィンドウ取得ヘルパー ─────────────────────────────────────────────
+// UITextEffectsWindow (キーボード) / UIRemoteKeyboardWindow 等のシステムウィンドウを
+// 除いた最初のウィンドウを返す。検索中もCFLogsが動くようにするために使う。
+static UIWindow *cf_appMainWindow(void) {
+    NSArray<UIWindow *> *wins = [UIApplication sharedApplication].windows;
+    for (UIWindow *w in wins) {
+        NSString *cls = NSStringFromClass([w class]);
+        if ([cls containsString:@"Keyboard"]    ||
+            [cls containsString:@"TextEffects"] ||
+            [cls containsString:@"Accessibility"]) continue;
+        return w;
+    }
+    return wins.firstObject;
+}
+
 static void cf_openLogViewer(void) {
-    UIWindow *window = nil;
-    if (@available(iOS 15, *))
-        for (UIScene *sc in [UIApplication sharedApplication].connectedScenes)
-            if ([sc isKindOfClass:[UIWindowScene class]])
-                for (UIWindow *w in ((UIWindowScene *)sc).windows)
-                    if (w.isKeyWindow) { window = w; break; }
+    // keyWindow ではなくアプリのメインウィンドウを起点にする
+    // (検索中はキーボードウィンドウが keyWindow になるため)
+    UIWindow *window = cf_appMainWindow();
     if (!window) window = [UIApplication sharedApplication].keyWindow;
     UIViewController *root = window.rootViewController;
     while (root.presentedViewController) root = root.presentedViewController;
@@ -145,6 +157,20 @@ static void cf_injectBtn(UIWindow *w) {
     });
 }
 
+// ボタンをメインウィンドウに確実に表示・最前面に維持する
+// becomeKeyWindow で毎回呼ぶことで、キーボード出現後も消えない
+static void cf_ensureBtn(void) {
+    UIWindow *w = cf_appMainWindow();
+    if (!w) return;
+    UIButton *btn = (UIButton *)objc_getAssociatedObject(w, &kCFBtnKey);
+    if (btn) {
+        // 既存ボタンをメインウィンドウの最前面に持ってくる
+        [w bringSubviewToFront:btn];
+    } else {
+        cf_injectBtn(w);
+    }
+}
+
 %hook UIButton
 %new - (void)cf_handleTap:(UIButton *)sender {
     if (sender.tag == 0xCF10) cf_openLogViewer();
@@ -165,7 +191,9 @@ static void cf_injectBtn(UIWindow *w) {
 %hook UIWindow
 - (void)becomeKeyWindow {
     %orig;
-    dispatch_async(dispatch_get_main_queue(), ^{ cf_injectBtn(self); });
+    // キーボード等のシステムウィンドウが keyWindow になっても
+    // cf_ensureBtn() でメインウィンドウのボタンを最前面に維持する
+    dispatch_async(dispatch_get_main_queue(), ^{ cf_ensureBtn(); });
 }
 %end
 
@@ -1063,7 +1091,117 @@ didUpdateWithPrevItems:(NSArray *)prevItems
 }
 %end
 
-// ─── ヘルパー: ShortsロゴSVG→PNG ────────────────────────────────────────────
+// ─── 検索結果フィルタリング ──────────────────────────────────────────────────
+//
+//  ログ分析結果:
+//    [InnerTube] vcClass=YTChipCloudCollectionViewController → チップバーのみ InnerTube 経由
+//    [Search-single] が出ない → addSectionsFromArray: も addSection: も呼ばれていない
+//    → 検索結果は YTSearchResultsViewController (または類似のVC) が
+//      独自のデータ受け取りメソッドを持っている
+//
+//  対応:
+//    1. YTSearchResultsViewController をフックして候補メソッドを調査ログで出す
+//    2. 最も可能性が高いメソッド群を即実装する
+
+// 共通フィルタリング：セクション1件を処理してフィルタ後も保持するなら YES を返す
+// (アイテム除外は section.contentsArray を直接書き換え)
+static BOOL cf_filterOneSectionInPlace(id section, CFWhitelistManager *wl) {
+    NSString *secCls = NSStringFromClass([section class]);
+    if ([secCls containsString:@"FilterChip"] ||
+        [secCls containsString:@"ChipBar"])   return YES; // 検索チップは通す
+
+    if ([secCls isEqualToString:@"YTIShelfRenderer"] ||
+        [secCls containsString:@"ShelfRenderer"]) {
+        CFLog(@"[SearchVC] Shelf removed cls=%@", secCls);
+        return NO;
+    }
+
+    if (![section respondsToSelector:@selector(contentsArray)]) return YES;
+    #pragma clang diagnostic push
+    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+    NSArray *items = [section performSelector:@selector(contentsArray)];
+    #pragma clang diagnostic pop
+    if (!items.count) return YES;
+
+    NSMutableIndexSet *toRemove = [NSMutableIndexSet indexSet];
+    for (NSUInteger ii = 0; ii < items.count; ii++) {
+        id item = items[ii];
+        if (![item respondsToSelector:@selector(elementRenderer)]) continue;
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        id er = [item performSelector:@selector(elementRenderer)];
+        #pragma clang diagnostic pop
+        if (!er || ![er respondsToSelector:@selector(elementData)]) continue;
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        id ed = [er performSelector:@selector(elementData)];
+        #pragma clang diagnostic pop
+        if (!ed || ![ed isKindOfClass:[NSData class]]) continue;
+        NSString *ch = cf_extractChannelId((NSData *)ed);
+        if (!ch.length || ![wl isChannelAllowed:ch]) {
+            [toRemove addIndex:ii];
+            if (ch.length) CFLog(@"[SearchVC] excluded ch=%@", ch);
+        }
+    }
+
+    if (toRemove.count == items.count) return NO; // セクション丸ごと除外
+
+    if (toRemove.count > 0) {
+        NSMutableArray *f = [items mutableCopy];
+        [f removeObjectsAtIndexes:toRemove];
+        if ([section respondsToSelector:@selector(setContentsArray:)]) {
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            [section performSelector:@selector(setContentsArray:) withObject:f];
+            #pragma clang diagnostic pop
+        }
+        CFLog(@"[SearchVC] section %lu->%lu items", (unsigned long)items.count, (unsigned long)f.count);
+    }
+    return YES;
+}
+
+// 検索VCが受け取る可能性のあるメソッドを全てフックする
+// VC名をログに出す（検索中に [SearchVC] vcClass=... が出ればフック成功）
+@interface YTSearchResultsViewController : UIViewController
+@end
+
+%hook YTSearchResultsViewController
+- (void)addSectionsFromArray:(NSArray *)array {
+    id s = (id)self;
+    CFLog(@"[SearchVC] addSectionsFromArray vcClass=%@ count=%lu",
+          NSStringFromClass([s class]), (unsigned long)array.count);
+    CFWhitelistManager *wl = [CFWhitelistManager sharedManager];
+    if ([wl isEmpty]) { %orig; return; }
+
+    NSMutableArray *filtered = [NSMutableArray arrayWithCapacity:array.count];
+    for (id sec in array) {
+        if (cf_filterOneSectionInPlace(sec, wl)) [filtered addObject:sec];
+    }
+    CFLog(@"[SearchVC] addSectionsFromArray: %lu -> %lu",
+          (unsigned long)array.count, (unsigned long)filtered.count);
+    %orig(filtered);
+}
+
+- (void)addSection:(id)section {
+    id s = (id)self;
+    CFLog(@"[SearchVC] addSection vcClass=%@", NSStringFromClass([s class]));
+    CFWhitelistManager *wl = [CFWhitelistManager sharedManager];
+    if ([wl isEmpty]) { %orig; return; }
+    if (cf_filterOneSectionInPlace(section, wl)) %orig;
+}
+
+// setSections: / updateSections: の可能性もカバー
+- (void)setSections:(NSArray *)sections {
+    CFLog(@"[SearchVC] setSections count=%lu", (unsigned long)sections.count);
+    CFWhitelistManager *wl = [CFWhitelistManager sharedManager];
+    if ([wl isEmpty]) { %orig; return; }
+    NSMutableArray *f = [NSMutableArray arrayWithCapacity:sections.count];
+    for (id sec in sections) {
+        if (cf_filterOneSectionInPlace(sec, wl)) [f addObject:sec];
+    }
+    %orig(f);
+}
+%end
 static UIImage *cf_shortsLogo(void) {
     static NSString *path;
     static dispatch_once_t once;
