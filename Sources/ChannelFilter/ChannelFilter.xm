@@ -28,6 +28,20 @@
 
 // ─── ログシステム ─────────────────────────────────────────────────────────────
 static NSMutableArray *_cfLogs;
+// NSUserDefaults書き込みをdebounce化（毎回synchronizeしない）
+static void cf_scheduleLogSave(void) {
+    static BOOL _pending = NO;
+    if (_pending) return;
+    _pending = YES;
+    // 1秒後にまとめて1回だけ書き込む
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        _pending = NO;
+        [[NSUserDefaults standardUserDefaults]
+            setObject:[_cfLogs copy] forKey:@"cf_debug_logs"];
+        // synchronizeは呼ばない（OSが適切なタイミングでフラッシュする）
+    });
+}
 static void CFLog(NSString *format, ...) {
     va_list args;
     va_start(args, format);
@@ -36,13 +50,14 @@ static void CFLog(NSString *format, ...) {
     NSLog(@"[CF] %@", msg);
     dispatch_async(dispatch_get_main_queue(), ^{
         if (!_cfLogs) {
-            NSArray *saved = [[NSUserDefaults standardUserDefaults] arrayForKey:@"cf_debug_logs"];
+            NSArray *saved = [[NSUserDefaults standardUserDefaults]
+                arrayForKey:@"cf_debug_logs"];
             _cfLogs = saved ? [saved mutableCopy] : [NSMutableArray array];
         }
         [_cfLogs addObject:msg];
-        if (_cfLogs.count > 800) [_cfLogs removeObjectAtIndex:0];
-        [[NSUserDefaults standardUserDefaults] setObject:[_cfLogs copy] forKey:@"cf_debug_logs"];
-        [[NSUserDefaults standardUserDefaults] synchronize];
+        // 上限300件（フィルタリングログが大量に出るため小さめに）
+        if (_cfLogs.count > 300) [_cfLogs removeObjectAtIndex:0];
+        cf_scheduleLogSave();
     });
 }
 
@@ -197,7 +212,10 @@ static void cf_ensureBtn(void) {
 }
 %end
 
-// ─── 前方宣言 ─────────────────────────────────────────────────────────────────
+// ─── デバッグダンプフラグ（グローバル: VC再生成でリセットされない）─────────
+static BOOL _cf_globalDumped = NO;
+
+
 @interface YTInlineSignInViewController : UIViewController
 - (void)didTapShowAddAccount;
 @end
@@ -652,18 +670,43 @@ didUpdateWithPrevItems:(NSArray *)prevItems
 
 - (void)addSectionsFromArray:(NSArray *)array {
     CFWhitelistManager *wl = [CFWhitelistManager sharedManager];
-    BOOL isSubscriptionFeed = [[NSUserDefaults standardUserDefaults]
-        boolForKey:@"cf_is_subscription_tab"];
-    BOOL shouldFilter = !isSubscriptionFeed && ![wl isEmpty];
 
-    // iPhoneではsetNavigationEndpointが呼ばれない場合がある
-    // 親VCのナビゲーションエンドポイントを直接確認して補完
-    if (!isSubscriptionFeed) {
+    // ─── browseId をself→親VCチェーンで確定（フラグ非依存）────────────────
+    // self自身のnavigationEndpointを最優先で確認し、
+    // 取得できなければVC階層を上って最初にbrowseIdを持つVCを使う。
+    // フラグ（NSUserDefaults）は補完用にのみ使う。
+    NSString *resolvedBrowseId = nil;
+    {
         id s = (id)self;
-        UIResponder *r = (UIResponder *)s;
-        while ((r = r.nextResponder)) {
-            if ([r isKindOfClass:[UIViewController class]]) {
-                id vc = r;
+
+        // まずself自身のnavigationEndpointを確認
+        if ([s respondsToSelector:@selector(navigationEndpoint)]) {
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            id ep = [s performSelector:@selector(navigationEndpoint)];
+            #pragma clang diagnostic pop
+            if (ep && [ep respondsToSelector:@selector(browseEndpoint)]) {
+                #pragma clang diagnostic push
+                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                id bep = [ep performSelector:@selector(browseEndpoint)];
+                #pragma clang diagnostic pop
+                if (bep && [bep respondsToSelector:@selector(browseId)]) {
+                    #pragma clang diagnostic push
+                    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                    NSString *bid = [bep performSelector:@selector(browseId)];
+                    #pragma clang diagnostic pop
+                    if (bid.length) resolvedBrowseId = bid;
+                }
+            }
+        }
+
+        // 取得できなければparentViewControllerチェーンを最大10段追う
+        if (!resolvedBrowseId) {
+            UIViewController *cur = (UIViewController *)s;
+            for (int depth = 0; depth < 10 && cur && !resolvedBrowseId; depth++) {
+                cur = cur.parentViewController;
+                if (!cur) break;
+                id vc = cur;
                 if ([vc respondsToSelector:@selector(navigationEndpoint)]) {
                     #pragma clang diagnostic push
                     #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
@@ -672,39 +715,46 @@ didUpdateWithPrevItems:(NSArray *)prevItems
                     if (ep && [ep respondsToSelector:@selector(browseEndpoint)]) {
                         #pragma clang diagnostic push
                         #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                        id browseEP = [ep performSelector:@selector(browseEndpoint)];
+                        id bep = [ep performSelector:@selector(browseEndpoint)];
                         #pragma clang diagnostic pop
-                        if (browseEP && [browseEP respondsToSelector:@selector(browseId)]) {
+                        if (bep && [bep respondsToSelector:@selector(browseId)]) {
                             #pragma clang diagnostic push
                             #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                            NSString *bId = [browseEP performSelector:@selector(browseId)];
+                            NSString *bid = [bep performSelector:@selector(browseId)];
                             #pragma clang diagnostic pop
-                            if ([bId isEqualToString:@"FEsubscriptions"]) {
-                                isSubscriptionFeed = YES;
-                                shouldFilter = NO;
-                                [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"cf_is_subscription_tab"];
-                                [[NSUserDefaults standardUserDefaults] synchronize];
-                                CFLog(@"[AppVC] FEsubscriptions detected via VC chain");
-                            } else if (bId.length > 0 && [bId hasPrefix:@"FE"]) {
-                                [[NSUserDefaults standardUserDefaults] setBool:NO forKey:@"cf_is_subscription_tab"];
-                                [[NSUserDefaults standardUserDefaults] synchronize];
-                            }
+                            if (bid.length) resolvedBrowseId = bid;
                         }
                     }
                 }
-                break;
             }
         }
     }
+
+    // browseIdが取れた場合はフラグも更新して整合させる
+    BOOL isSubscriptionFeed;
+    if (resolvedBrowseId.length) {
+        isSubscriptionFeed = [resolvedBrowseId isEqualToString:@"FEsubscriptions"];
+        // フラグを実態に合わせて更新
+        [[NSUserDefaults standardUserDefaults]
+            setBool:isSubscriptionFeed forKey:@"cf_is_subscription_tab"];
+        CFLog(@"[AppVC] resolvedBrowseId=%@ isSub=%d", resolvedBrowseId, (int)isSubscriptionFeed);
+    } else {
+        // browseIdが取れない（検索・動画視聴ページ等）→ フラグを参照しつつFALSEを優先
+        // 検索タブはbrowseEndpointなしで呼ばれるのでフィルタリングON
+        isSubscriptionFeed = [[NSUserDefaults standardUserDefaults]
+            boolForKey:@"cf_is_subscription_tab"];
+        CFLog(@"[AppVC] no resolvedBrowseId, fallback flag isSub=%d", (int)isSubscriptionFeed);
+    }
+
+    BOOL shouldFilter = !isSubscriptionFeed && ![wl isEmpty];
 
     CFLog(@"[AppVC] count=%lu isSub=%d shouldFilter=%d wlEmpty=%d",
           (unsigned long)array.count, (int)isSubscriptionFeed,
           (int)shouldFilter, (int)[wl isEmpty]);
 
     // 最初の呼び出しのみ全セクションを再帰ダンプ（構造特定用）
-    static BOOL _dumped = NO;
-    if (!_dumped && shouldFilter && array.count > 5) {
-        _dumped = YES;
+    if (!_cf_globalDumped && shouldFilter && array.count > 5) {
+        _cf_globalDumped = YES;
         CFLog(@"[Dump] ===== START DUMP count=%lu =====", (unsigned long)array.count);
         for (NSUInteger di = 0; di < MIN(array.count, 8); di++) {
             cf_dumpObject(array[di], 0, di);
@@ -934,6 +984,15 @@ didUpdateWithPrevItems:(NSArray *)prevItems
               (int)isSubscriptionFeed, (int)shouldFilter);
     }
 
+    // 検索VC判定: vcClassが検索系の場合は登録タブフラグを無視してフィルタリングON
+    BOOL isSearchVC = ([vcClass containsString:@"Search"] ||
+                       [vcClass containsString:@"search"]);
+    if (isSearchVC && ![wl isEmpty]) {
+        shouldFilter = YES;
+        isSubscriptionFeed = NO;
+        CFLog(@"[InnerTube] detected SearchVC -> shouldFilter=YES");
+    }
+
     if (!shouldFilter && !isSubscriptionFeed) {
         %orig;
         return;
@@ -1023,6 +1082,15 @@ didUpdateWithPrevItems:(NSArray *)prevItems
     id s = (id)self;
     NSString *vcClass = NSStringFromClass([s class]);
     CFLog(@"[Search-single] vcClass=%@ shouldFilter=%d", vcClass, (int)shouldFilter);
+
+    // 検索VC判定: vcClassが検索系の場合は登録タブフラグを無視してフィルタリングON
+    // (検索タブはbrowseEndpointなしで呼ばれるためフラグがOFFになっていないことがある)
+    BOOL isSearchVC = ([vcClass containsString:@"Search"] ||
+                       [vcClass containsString:@"search"]);
+    if (isSearchVC && ![wl isEmpty]) {
+        shouldFilter = YES;
+        isSubscriptionFeed = NO;
+    }
 
     if (!shouldFilter) { %orig; return; }
 
@@ -1171,6 +1239,7 @@ static BOOL cf_filterOneSectionInPlace(id section, CFWhitelistManager *wl) {
     CFLog(@"[SearchVC] addSectionsFromArray vcClass=%@ count=%lu",
           NSStringFromClass([s class]), (unsigned long)array.count);
     CFWhitelistManager *wl = [CFWhitelistManager sharedManager];
+    // 検索VCは登録タブフラグに関わらず常にフィルタリング
     if ([wl isEmpty]) { %orig; return; }
 
     NSMutableArray *filtered = [NSMutableArray arrayWithCapacity:array.count];
@@ -1186,6 +1255,7 @@ static BOOL cf_filterOneSectionInPlace(id section, CFWhitelistManager *wl) {
     id s = (id)self;
     CFLog(@"[SearchVC] addSection vcClass=%@", NSStringFromClass([s class]));
     CFWhitelistManager *wl = [CFWhitelistManager sharedManager];
+    // 検索VCは登録タブフラグに関わらず常にフィルタリング
     if ([wl isEmpty]) { %orig; return; }
     if (cf_filterOneSectionInPlace(section, wl)) %orig;
 }
@@ -1193,6 +1263,44 @@ static BOOL cf_filterOneSectionInPlace(id section, CFWhitelistManager *wl) {
 // setSections: / updateSections: の可能性もカバー
 - (void)setSections:(NSArray *)sections {
     CFLog(@"[SearchVC] setSections count=%lu", (unsigned long)sections.count);
+    CFWhitelistManager *wl = [CFWhitelistManager sharedManager];
+    // 検索VCは登録タブフラグに関わらず常にフィルタリング
+    if ([wl isEmpty]) { %orig; return; }
+    NSMutableArray *f = [NSMutableArray arrayWithCapacity:sections.count];
+    for (id sec in sections) {
+        if (cf_filterOneSectionInPlace(sec, wl)) [f addObject:sec];
+    }
+    %orig(f);
+}
+%end
+
+// ─── 検索VC別名候補フック ─────────────────────────────────────────────────────
+// YTSearchResultsCollectionViewController など名前違いのVCもカバー
+@interface YTSearchResultsCollectionViewController : UIViewController
+@end
+
+%hook YTSearchResultsCollectionViewController
+- (void)addSectionsFromArray:(NSArray *)array {
+    id s = (id)self;
+    CFLog(@"[SearchVC2] addSectionsFromArray vcClass=%@ count=%lu",
+          NSStringFromClass([s class]), (unsigned long)array.count);
+    CFWhitelistManager *wl = [CFWhitelistManager sharedManager];
+    if ([wl isEmpty]) { %orig; return; }
+    NSMutableArray *f = [NSMutableArray arrayWithCapacity:array.count];
+    for (id sec in array) {
+        if (cf_filterOneSectionInPlace(sec, wl)) [f addObject:sec];
+    }
+    %orig(f);
+}
+- (void)addSection:(id)section {
+    id s = (id)self;
+    CFLog(@"[SearchVC2] addSection vcClass=%@", NSStringFromClass([s class]));
+    CFWhitelistManager *wl = [CFWhitelistManager sharedManager];
+    if ([wl isEmpty]) { %orig; return; }
+    if (cf_filterOneSectionInPlace(section, wl)) %orig;
+}
+- (void)setSections:(NSArray *)sections {
+    CFLog(@"[SearchVC2] setSections count=%lu", (unsigned long)sections.count);
     CFWhitelistManager *wl = [CFWhitelistManager sharedManager];
     if ([wl isEmpty]) { %orig; return; }
     NSMutableArray *f = [NSMutableArray arrayWithCapacity:sections.count];
