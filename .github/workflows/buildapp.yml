@@ -18,7 +18,7 @@ on:
         type: string
       decrypted_youtube_url:
         description: "Direct URL of the decrypted YouTube IPA"
-        default: ""
+        default: "https://github.com/mnaoki20081106-afk/uYouEnhanced-ChannelFilter/releases/download/ipa/com.google.ios.youtube_21.10.2_und3fined.ipa"
         required: true
         type: string
       bundle_id:
