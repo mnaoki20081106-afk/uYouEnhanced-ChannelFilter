@@ -299,9 +299,15 @@ jobs:
           echo "==> uYouEnhanced.dylib UUID"
           dwarfdump --uuid "$APP/Frameworks/uYouEnhanced.dylib" || true
           echo "==> disassembly around 0xcf5c (crash site)"
-          otool -tV "$APP/Frameworks/uYouEnhanced.dylib" | awk '{ if (match($1, /^[0-9a-f]+$/)) { a=strtonum("0x"$1); if (a>=0xcd00 && a<=0xd000) print } else if ($0 ~ /:$/) last=$0 }' || true
-          echo "==> objc stubs referenced"
-          otool -tV "$APP/Frameworks/uYouEnhanced.dylib" | awk '{ if (match($1, /^[0-9a-f]+$/)) { a=strtonum("0x"$1); if (a>=0xc800 && a<=0xd200 && $0 ~ /objc_msgSend\$/) print } }' || true
+          otool -tV "$APP/Frameworks/uYouEnhanced.dylib" > /tmp/dis.txt || true
+          python3 - <<'PYEOF'
+          import re
+          lines = open("/tmp/dis.txt").read().splitlines()
+          for i, l in enumerate(lines):
+              m = re.match(r"^([0-9a-f]+)\s", l)
+              if m and 0xcd00 <= int(m.group(1), 16) <= 0xd000:
+                  print(l)
+          PYEOF
 
       - name: Upload Artifact
         if: ${{ inputs.upload_artifact }}
