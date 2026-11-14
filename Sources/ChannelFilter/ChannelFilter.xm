@@ -796,7 +796,6 @@ static NSArray *cf_filterReelModels(NSArray *models, CFWhitelistManager *wl) {
             UICollectionView *cv = (UICollectionView *)strongSelf;
             NSArray *visibleCells = [cv visibleCells];
             if (!visibleCells.count) return;
-            NSMutableArray *toRemove = nil;
             CFTimeInterval now = CACurrentMediaTime();
 
             // _ASCollectionViewCell のみ処理（クラス名判定はクラスごとに1回）
@@ -825,19 +824,18 @@ static NSArray *cf_filterReelModels(NSArray *models, CFWhitelistManager *wl) {
                 if (!node) continue;
 
                 // YTVideoWithContextNode 系のみフィルタ対象
-                if (!cf_cellNodeShouldBlock(node, wl, now)) continue;
+                BOOL blocked = cf_cellNodeShouldBlock(node, wl, now);
 
-                NSIndexPath *ip = [cv indexPathForCell:cell];
-                if (!ip) continue;
-                if (!toRemove) toRemove = [NSMutableArray array];
-                [toRemove addObject:ip];
-            }
-
-            if (toRemove.count > 0) {
-                CFLog(@"[UI-Layer] removing %lu cells", (unsigned long)toRemove.count);
-                [cv performBatchUpdates:^{
-                    [cv deleteItemsAtIndexPaths:toRemove];
-                } completion:nil];
+                // セルは削除せず、中身を隠してタップできなくするだけにする。
+                // （以前は deleteItemsAtIndexPaths: で消していたが、データソースの件数を
+                //   変えずに行を消すと Texture のバッチ更新が不整合で例外を投げ、
+                //   非同期処理のため @try でも捕まらず起動直後にアプリが落ちていた）
+                // セルは再利用されるので、許可セルでは必ず元に戻す。
+                if (cell.contentView.hidden != blocked) {
+                    cell.contentView.hidden = blocked;
+                    cell.userInteractionEnabled = !blocked;
+                    if (blocked) CFLog(@"[UI-Layer] hid cell");
+                }
             }
         } @catch (NSException *e) {
             NSLog(@"[CF] UI-Layer exception: %@", e);
