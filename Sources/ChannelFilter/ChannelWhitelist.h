@@ -28,6 +28,9 @@
 /// ホワイトリストが空かどうか（空のときはフィルタをかけない＝詰み防止）
 - (BOOL)isEmpty;
 
+/// ホワイトリストの内容が変わるたびに増える番号（判定結果キャッシュの無効化用）
+@property (atomic, readonly) NSUInteger generation;
+
 /// 現在のホワイトリスト（チャンネルIDの配列、デバッグ表示用）
 - (NSArray<NSString *> *)allowedChannelIDs;
 

@@ -43,6 +43,20 @@
 - (void)removeOffendingCells;
 @end
 
+// ─── デバッグスイッチ ─────────────────────────────────────────────────────────
+// 通常ビルドではログ・「CF Logs」ボタン・起動時クラススキャンを全て無効化する。
+// （ログ1件ごとの main キュー投入と NSUserDefaults への保存、全クラス走査が
+//   フィード読み込みと起動を遅くしていたため）
+// 調査したいときは `make package CF_DEBUG=1 ...` でビルドする。
+#ifndef CF_DEBUG
+#define CF_DEBUG 0
+#endif
+
+// ─── 登録チャンネルタブ表示中フラグ（メモリ上のみ。NSUserDefaults は使わない）──
+static BOOL _cf_isSubscriptionTab = NO;
+// YTAppCollectionViewController 側でフィルタ済みの配列を %orig に渡している最中か
+static BOOL _cf_appVCFiltering = NO;
+
 // ─── ログシステム ─────────────────────────────────────────────────────────────
 static NSMutableArray *_cfLogs;
 static void cf_scheduleLogSave(void) {
@@ -56,7 +70,7 @@ static void cf_scheduleLogSave(void) {
             setObject:[_cfLogs copy] forKey:@"cf_debug_logs"];
     });
 }
-static void CFLog(NSString *format, ...) {
+static void cf_logImpl(NSString *format, ...) {
     va_list args;
     va_start(args, format);
     NSString *msg = [[NSString alloc] initWithFormat:format arguments:args];
@@ -73,6 +87,8 @@ static void CFLog(NSString *format, ...) {
         cf_scheduleLogSave();
     });
 }
+// CF_DEBUG=0 のときは引数の評価ごとコンパイラに消される
+#define CFLog(...) do { if (CF_DEBUG) cf_logImpl(__VA_ARGS__); } while (0)
 
 // ─── ログビューア（検索バー付き）─────────────────────────────────────────────
 @interface CFLogViewController : UIViewController
@@ -338,7 +354,7 @@ static void cf_ensureBtn(void) {
 %hook UIWindow
 - (void)becomeKeyWindow {
     %orig;
-    dispatch_async(dispatch_get_main_queue(), ^{ cf_ensureBtn(); });
+    if (CF_DEBUG) dispatch_async(dispatch_get_main_queue(), ^{ cf_ensureBtn(); });
 }
 %end
 
@@ -359,25 +375,48 @@ static void cf_showAlert(NSString *title, NSString *message) {
 }
 
 // ─── ヘルパー: channelId 抽出 ─────────────────────────────────────────────────
-static NSRegularExpression *cf_channelIdRegex(void) {
-    static NSRegularExpression *regex;
+// "UC" + [A-Za-z0-9_-]{22} を生バイト列から直接探す。
+// （以前は NSData 全体を NSString に変換して正規表現をかけており、
+//   フィード1ページごとに数十KB×件数ぶんのコピーと照合が走っていた）
+static NSString *cf_extractChannelId(NSData *data) {
+    static uint8_t valid[256];
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        regex = [NSRegularExpression
-            regularExpressionWithPattern:@"UC[A-Za-z0-9_-]{22}"
-                                 options:0 error:nil];
+        for (int c = '0'; c <= '9'; c++) valid[c] = 1;
+        for (int c = 'a'; c <= 'z'; c++) valid[c] = 1;
+        for (int c = 'A'; c <= 'Z'; c++) valid[c] = 1;
+        valid['_'] = 1; valid['-'] = 1;
     });
-    return regex;
+    NSUInteger len = data.length;
+    if (len < 24) return nil;
+    const uint8_t *bytes = (const uint8_t *)data.bytes;
+    const uint8_t *end = bytes + len - 23; // 'U' を置ける最後の位置の次
+    const uint8_t *p = bytes;
+    while (p < end && (p = (const uint8_t *)memchr(p, 'U', (size_t)(end - p)))) {
+        if (p[1] == 'C') {
+            int i = 2;
+            while (i < 24 && valid[p[i]]) i++;
+            if (i == 24) {
+                return [[NSString alloc] initWithBytes:p length:24
+                                              encoding:NSASCIIStringEncoding];
+            }
+        }
+        p++;
+    }
+    return nil;
 }
 
-static NSString *cf_extractChannelId(NSData *data) {
-    if (!data) return nil;
-    NSString *raw = [[NSString alloc] initWithData:data
-                                          encoding:NSISOLatin1StringEncoding];
-    if (!raw) return nil;
-    NSTextCheckingResult *m = [cf_channelIdRegex()
-        firstMatchInString:raw options:0 range:NSMakeRange(0, raw.length)];
-    return m ? [raw substringWithRange:m.range] : nil;
+// reelWatchEndpoint.params（URLセーフBase64）から channelId を取り出す
+static NSString *cf_channelIdFromParams(id pv) {
+    if (![pv isKindOfClass:[NSString class]]) return nil;
+    NSString *b64 = [(NSString *)pv
+        stringByReplacingOccurrencesOfString:@"-" withString:@"+"];
+    b64 = [b64 stringByReplacingOccurrencesOfString:@"_" withString:@"/"];
+    NSUInteger rem = b64.length % 4;
+    if (rem) b64 = [b64 stringByPaddingToLength:b64.length + (4 - rem)
+                                     withString:@"=" startingAtIndex:0];
+    NSData *dec = [[NSData alloc] initWithBase64EncodedString:b64 options:0];
+    return dec ? cf_extractChannelId(dec) : nil;
 }
 
 // ─── ヘルパー: UI層ノードからchannelIdを抽出（Gonerino方式 + channelIdベース）─
@@ -443,25 +482,8 @@ static NSString *cf_channelIdFromNode(id node) {
                         #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
                         id pv = [reelEP performSelector:ps];
                         #pragma clang diagnostic pop
-                        if ([pv isKindOfClass:[NSString class]]) {
-                            NSString *b64 = [(NSString *)pv
-                                stringByReplacingOccurrencesOfString:@"-" withString:@"+"];
-                            b64 = [b64 stringByReplacingOccurrencesOfString:@"_" withString:@"/"];
-                            NSInteger pad = 4 - (b64.length % 4);
-                            if (pad < 4) for (NSInteger i = 0; i < pad; i++)
-                                b64 = [b64 stringByAppendingString:@"="];
-                            NSData *dec = [[NSData alloc] initWithBase64EncodedString:b64 options:0];
-                            if (dec) {
-                                NSString *str = [[NSString alloc] initWithData:dec
-                                    encoding:NSISOLatin1StringEncoding];
-                                if (str) {
-                                    NSTextCheckingResult *m = [cf_channelIdRegex()
-                                        firstMatchInString:str options:0
-                                        range:NSMakeRange(0, str.length)];
-                                    if (m) return [str substringWithRange:m.range];
-                                }
-                            }
-                        }
+                        NSString *ch = cf_channelIdFromParams(pv);
+                        if (ch.length) return ch;
                     }
                 }
             }
@@ -490,12 +512,26 @@ static BOOL cf_nodeShouldBlock(id node, CFWhitelistManager *wl) {
     if (!node || [wl isEmpty]) return NO;
 
     // 動画ノード系のみ対象（広告・UIパーツ等の誤検知を防ぐ）
-    NSString *nodeCls = NSStringFromClass([node class]);
-    BOOL isVideoNode = ([nodeCls containsString:@"VideoWithContext"] ||
-                        [nodeCls containsString:@"CompactVideo"]     ||
-                        [nodeCls containsString:@"GridVideo"]        ||
-                        [nodeCls containsString:@"SearchResult"]     ||
-                        [nodeCls containsString:@"VideoCell"]);
+    // クラス名の文字列判定はクラスごとに1回だけ行い、結果をキャッシュする
+    // （この関数は main スレッドからのみ呼ばれる）
+    static CFMutableDictionaryRef clsCache;
+    if (!clsCache) clsCache = CFDictionaryCreateMutable(NULL, 0, NULL, NULL);
+    Class nodeClass = [node class];
+    NSString *nodeCls = nil;
+    BOOL isVideoNode;
+    uintptr_t cached = (uintptr_t)CFDictionaryGetValue(clsCache, (__bridge const void *)nodeClass);
+    if (cached) {
+        isVideoNode = (cached == 2);
+    } else {
+        nodeCls = NSStringFromClass(nodeClass);
+        isVideoNode = ([nodeCls containsString:@"VideoWithContext"] ||
+                       [nodeCls containsString:@"CompactVideo"]     ||
+                       [nodeCls containsString:@"GridVideo"]        ||
+                       [nodeCls containsString:@"SearchResult"]     ||
+                       [nodeCls containsString:@"VideoCell"]);
+        CFDictionarySetValue(clsCache, (__bridge const void *)nodeClass,
+                             (const void *)(uintptr_t)(isVideoNode ? 2 : 1));
+    }
 
     if (isVideoNode) {
         NSString *channelId = cf_channelIdFromNode(node);
@@ -505,7 +541,8 @@ static BOOL cf_nodeShouldBlock(id node, CFWhitelistManager *wl) {
             return !allowed;
         }
         // channelId取得不可 → 念のためブロック（広告・ショート等）
-        CFLog(@"[UI-Layer] no channelId for node=%@, blocking", nodeCls);
+        CFLog(@"[UI-Layer] no channelId for node=%@, blocking",
+              nodeCls ?: NSStringFromClass(nodeClass));
         return YES;
     }
 
@@ -521,6 +558,44 @@ static BOOL cf_nodeShouldBlock(id node, CFWhitelistManager *wl) {
         }
     }
     return NO;
+}
+
+// ─── ヘルパー: セルノード単位の判定キャッシュ ────────────────────────────────
+// layoutSubviews はスクロール中毎フレーム呼ばれるため、同じセルを毎回
+// ノードツリーごと再判定すると非常に重い。判定結果をノードに紐付けて再利用する。
+//   - ブロック判定      : ホワイトリストが変わるまで再計算しない
+//   - それ以外（許可等）: kCFRecheckInterval 秒に1回だけ再判定する
+//     （ノードの中身が後から組み上がるケースを取りこぼさないため、永久には信用しない）
+@interface CFNodeVerdict : NSObject {
+@public
+    NSUInteger generation;
+    CFTimeInterval checkedAt;
+    BOOL blocked;
+}
+@end
+@implementation CFNodeVerdict
+@end
+
+static const CFTimeInterval kCFRecheckInterval = 0.5;
+static const char kCFVerdictKey = 0;
+static const char kCFScanPendingKey = 0;
+
+static BOOL cf_cellNodeShouldBlock(id node, CFWhitelistManager *wl, CFTimeInterval now) {
+    NSUInteger gen = wl.generation;
+    CFNodeVerdict *v = objc_getAssociatedObject(node, &kCFVerdictKey);
+    if (v && v->generation == gen &&
+        (v->blocked || now - v->checkedAt < kCFRecheckInterval)) {
+        return v->blocked;
+    }
+    if (!v) {
+        v = [[CFNodeVerdict alloc] init];
+        objc_setAssociatedObject(node, &kCFVerdictKey, v,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    v->generation = gen;
+    v->checkedAt  = now;
+    v->blocked    = cf_nodeShouldBlock(node, wl);
+    return v->blocked;
 }
 
 // ─── ヘルパー: Model層セクション1件フィルタリング ────────────────────────────
@@ -584,38 +659,65 @@ static BOOL cf_filterOneSectionInPlace(id section, CFWhitelistManager *wl) {
 }
 
 // ─── STARDYロゴ ──────────────────────────────────────────────────────────────
-static UIImage *cf_stardyLogo(BOOL dark) {
-    static NSString *darkPath, *litePath;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        NSString *bPath = [[NSBundle mainBundle]
-            pathForResource:@"uYouPlus" ofType:@"bundle"];
-        NSBundle *b = bPath ? [NSBundle bundleWithPath:bPath] : nil;
-        darkPath = [b pathForResource:@"PremiumLogo_dark" ofType:@"png"];
-        litePath = [b pathForResource:@"PremiumLogo_lite" ofType:@"png"];
-    });
-    NSString *path = dark ? darkPath : litePath;
+// 画像はディスクから1回だけ読み、以後はメモリ上のものを返す
+static UIImage *cf_loadBundleImage(NSString *name, CGFloat scale) {
+    NSString *bPath = [[NSBundle mainBundle]
+        pathForResource:@"uYouPlus" ofType:@"bundle"];
+    NSBundle *b = bPath ? [NSBundle bundleWithPath:bPath] : nil;
+    NSString *path = [b pathForResource:name ofType:@"png"];
     if (!path) return nil;
     UIImage *raw = [UIImage imageWithContentsOfFile:path];
     if (!raw) return nil;
-    return [UIImage imageWithCGImage:raw.CGImage scale:2.0f
+    return [UIImage imageWithCGImage:raw.CGImage scale:scale
                          orientation:UIImageOrientationUp];
 }
 
-static UIImage *cf_shortsLogo(void) {
-    static NSString *path;
+static UIImage *cf_stardyLogo(BOOL dark) {
+    static UIImage *darkImg, *liteImg;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        NSString *bPath = [[NSBundle mainBundle]
-            pathForResource:@"uYouPlus" ofType:@"bundle"];
-        NSBundle *b = bPath ? [NSBundle bundleWithPath:bPath] : nil;
-        path = [b pathForResource:@"ShortsLogo" ofType:@"png"];
+        darkImg = cf_loadBundleImage(@"PremiumLogo_dark", 2.0f);
+        liteImg = cf_loadBundleImage(@"PremiumLogo_lite", 2.0f);
     });
-    if (!path) return nil;
-    UIImage *raw = [UIImage imageWithContentsOfFile:path];
-    if (!raw) return nil;
-    return [UIImage imageWithCGImage:raw.CGImage scale:10.0f
-                         orientation:UIImageOrientationUp];
+    return dark ? darkImg : liteImg;
+}
+
+static UIImage *cf_shortsLogo(void) {
+    static UIImage *img;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        img = cf_loadBundleImage(@"ShortsLogo", 10.0f);
+    });
+    return img;
+}
+
+// imageNamed: は非常に頻繁に呼ばれるので、置き換え対象かどうかを
+// 文字列比較の連鎖ではなくハッシュ1回の引き当てで判定する
+static UIImage *cf_replacementImage(NSString *name) {
+    static NSDictionary<NSString *, NSNumber *> *map;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        map = @{
+            @"youtube_logo_dark_cairo":                  @1,
+            @"youtube_premium_logo_dark_cairo":          @1,
+            @"youtube_premium_badge_light":              @2,
+            @"youtube_premium_standalone_cairo":         @2,
+            @"youtube_shorts_24_cairo":                  @3,
+            @"youtube_outline_experimental/shorts_24pt": @3,
+            @"youtube_fill_experimental/shorts_24pt":    @3,
+            @"ic_shorts_logo":                           @3,
+            @"youtube_shorts_logo":                      @3,
+            @"shorts_logo":                              @3,
+            @"reel_logo":                                @3,
+        };
+    });
+    if (!name) return nil;
+    switch (map[name].intValue) {
+        case 1:  return cf_stardyLogo(YES);
+        case 2:  return cf_stardyLogo(NO);
+        case 3:  return cf_shortsLogo();
+        default: return nil;
+    }
 }
 
 // ─── ショートタブ フィルター（Model層）────────────────────────────────────────
@@ -627,19 +729,7 @@ static NSString *cf_channelIdFromReelEP(id reelEP) {
     #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
     id pv = [reelEP performSelector:ps];
     #pragma clang diagnostic pop
-    if (!pv || ![pv isKindOfClass:[NSString class]]) return nil;
-    NSString *b64 = [(NSString *)pv
-        stringByReplacingOccurrencesOfString:@"-" withString:@"+"];
-    b64 = [b64 stringByReplacingOccurrencesOfString:@"_" withString:@"/"];
-    NSInteger pad = 4 - (b64.length % 4);
-    if (pad < 4) for (NSInteger i = 0; i < pad; i++) b64 = [b64 stringByAppendingString:@"="];
-    NSData *decoded = [[NSData alloc] initWithBase64EncodedString:b64 options:0];
-    if (!decoded) return nil;
-    NSString *str = [[NSString alloc] initWithData:decoded encoding:NSISOLatin1StringEncoding];
-    if (!str) return nil;
-    NSTextCheckingResult *m = [cf_channelIdRegex()
-        firstMatchInString:str options:0 range:NSMakeRange(0, str.length)];
-    return m ? [str substringWithRange:m.range] : nil;
+    return cf_channelIdFromParams(pv);
 }
 
 static id cf_reelEPFromModel(id model) {
@@ -688,10 +778,16 @@ static NSArray *cf_filterReelModels(NSArray *models, CFWhitelistManager *wl) {
 
 %new
 - (void)removeOffendingCells {
+    // 1回のランループ内で何度 layoutSubviews が来ても、走査の予約は1つだけにする
+    if (objc_getAssociatedObject(self, &kCFScanPendingKey)) return;
+    objc_setAssociatedObject(self, &kCFScanPendingKey, @YES,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     __weak id weakSelf = self;
     dispatch_async(dispatch_get_main_queue(), ^{
         __strong id strongSelf = weakSelf;
         if (!strongSelf) return;
+        objc_setAssociatedObject(strongSelf, &kCFScanPendingKey, nil,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 
         CFWhitelistManager *wl = [CFWhitelistManager sharedManager];
         if ([wl isEmpty]) return;
@@ -699,14 +795,28 @@ static NSArray *cf_filterReelModels(NSArray *models, CFWhitelistManager *wl) {
         @try {
             UICollectionView *cv = (UICollectionView *)strongSelf;
             NSArray *visibleCells = [cv visibleCells];
-            NSMutableArray *toRemove = [NSMutableArray array];
+            if (!visibleCells.count) return;
+            NSMutableArray *toRemove = nil;
+            CFTimeInterval now = CACurrentMediaTime();
+
+            // _ASCollectionViewCell のみ処理（クラス名判定はクラスごとに1回）
+            static Class asCellClass, otherCellClass;
+            static SEL nodeSel;
+            if (!nodeSel) nodeSel = NSSelectorFromString(@"node");
 
             for (UICollectionViewCell *cell in visibleCells) {
-                // _ASCollectionViewCell のみ処理
-                if (![NSStringFromClass([cell class])
-                      containsString:@"ASCollectionViewCell"]) continue;
+                Class cellClass = [cell class];
+                if (cellClass != asCellClass) {
+                    if (cellClass == otherCellClass) continue;
+                    if ([NSStringFromClass(cellClass)
+                         containsString:@"ASCollectionViewCell"]) {
+                        asCellClass = cellClass;
+                    } else {
+                        otherCellClass = cellClass;
+                        continue;
+                    }
+                }
 
-                SEL nodeSel = NSSelectorFromString(@"node");
                 if (![cell respondsToSelector:nodeSel]) continue;
                 #pragma clang diagnostic push
                 #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
@@ -715,10 +825,12 @@ static NSArray *cf_filterReelModels(NSArray *models, CFWhitelistManager *wl) {
                 if (!node) continue;
 
                 // YTVideoWithContextNode 系のみフィルタ対象
-                if (!cf_nodeShouldBlock(node, wl)) continue;
+                if (!cf_cellNodeShouldBlock(node, wl, now)) continue;
 
                 NSIndexPath *ip = [cv indexPathForCell:cell];
-                if (ip) [toRemove addObject:ip];
+                if (!ip) continue;
+                if (!toRemove) toRemove = [NSMutableArray array];
+                [toRemove addObject:ip];
             }
 
             if (toRemove.count > 0) {
@@ -789,7 +901,7 @@ didUpdateWithPrevItems:(NSArray *)prev
     if (!bid.length) return;
     CFLog(@"[PivotBar] browseId=%@", bid);
     BOOL isSub = [bid isEqualToString:@"FEsubscriptions"];
-    [[NSUserDefaults standardUserDefaults] setBool:isSub forKey:@"cf_is_subscription_tab"];
+    _cf_isSubscriptionTab = isSub;
 }
 
 - (void)setSelectedItemEndpoint:(id)ep {
@@ -811,7 +923,7 @@ didUpdateWithPrevItems:(NSArray *)prev
     }
     if (!bid.length) return;
     BOOL isSub = [bid isEqualToString:@"FEsubscriptions"];
-    [[NSUserDefaults standardUserDefaults] setBool:isSub forKey:@"cf_is_subscription_tab"];
+    _cf_isSubscriptionTab = isSub;
 }
 %end
 
@@ -838,7 +950,7 @@ didUpdateWithPrevItems:(NSArray *)prev
     if (!bid.length) return;
     CFLog(@"[BrowseVC] viewWillAppear browseId=%@", bid);
     BOOL isSub = [bid isEqualToString:@"FEsubscriptions"];
-    [[NSUserDefaults standardUserDefaults] setBool:isSub forKey:@"cf_is_subscription_tab"];
+    _cf_isSubscriptionTab = isSub;
 }
 
 - (void)setNavigationEndpoint:(id)ep {
@@ -853,7 +965,7 @@ didUpdateWithPrevItems:(NSArray *)prev
     }
     if (!bep) {
         // browseEndpointなし = 検索 → フラグOFF
-        [[NSUserDefaults standardUserDefaults] setBool:NO forKey:@"cf_is_subscription_tab"];
+        _cf_isSubscriptionTab = NO;
         CFLog(@"[BrowseVC] no browseEP -> FLAG OFF");
         return;
     }
@@ -868,7 +980,7 @@ didUpdateWithPrevItems:(NSArray *)prev
     CFLog(@"[BrowseVC] setNavEP browseId=%@", bid);
     BOOL isSub = [bid isEqualToString:@"FEsubscriptions"];
     if ([bid hasPrefix:@"FE"]) {
-        [[NSUserDefaults standardUserDefaults] setBool:isSub forKey:@"cf_is_subscription_tab"];
+        _cf_isSubscriptionTab = isSub;
     }
     // UC...チャンネルページはフラグ変更しない
 }
@@ -888,7 +1000,7 @@ didUpdateWithPrevItems:(NSArray *)prev
         #pragma clang diagnostic pop
     }
     if (!bep) {
-        [[NSUserDefaults standardUserDefaults] setBool:NO forKey:@"cf_is_subscription_tab"];
+        _cf_isSubscriptionTab = NO;
         return;
     }
     NSString *bid = nil;
@@ -901,7 +1013,7 @@ didUpdateWithPrevItems:(NSArray *)prev
     if (!bid.length) return;
     BOOL isSub = [bid isEqualToString:@"FEsubscriptions"];
     if ([bid hasPrefix:@"FE"]) {
-        [[NSUserDefaults standardUserDefaults] setBool:isSub forKey:@"cf_is_subscription_tab"];
+        _cf_isSubscriptionTab = isSub;
     }
 }
 
@@ -965,12 +1077,10 @@ didUpdateWithPrevItems:(NSArray *)prev
     BOOL isSubscriptionFeed;
     if (resolvedBrowseId.length) {
         isSubscriptionFeed = [resolvedBrowseId isEqualToString:@"FEsubscriptions"];
-        [[NSUserDefaults standardUserDefaults]
-            setBool:isSubscriptionFeed forKey:@"cf_is_subscription_tab"];
+        _cf_isSubscriptionTab = isSubscriptionFeed;
         CFLog(@"[AppVC] browseId=%@ isSub=%d", resolvedBrowseId, (int)isSubscriptionFeed);
     } else {
-        isSubscriptionFeed = [[NSUserDefaults standardUserDefaults]
-            boolForKey:@"cf_is_subscription_tab"];
+        isSubscriptionFeed = _cf_isSubscriptionTab;
         CFLog(@"[AppVC] no browseId, fallback flag isSub=%d", (int)isSubscriptionFeed);
     }
 
@@ -1085,7 +1195,12 @@ didUpdateWithPrevItems:(NSArray *)prev
               (unsigned long)toRemoveSections.count,
               (unsigned long)filtered.count);
     }
+    // 親クラス(YTInnerTubeCollectionViewController)側のフックで同じ配列を
+    // もう一度走査しないよう、フィルタ済みであることを伝える
+    BOOL prevFiltering = _cf_appVCFiltering;
+    _cf_appVCFiltering = shouldFilter;
     %orig(filtered);
+    _cf_appVCFiltering = prevFiltering;
 
     if (isSubscriptionFeed && channelIdsForSync.count > 0) {
         [wl syncSubscribedChannelIDs:channelIdsForSync];
@@ -1097,10 +1212,12 @@ didUpdateWithPrevItems:(NSArray *)prev
 // ─── InnerTube VC フック（サブクラス補完 + 検索VC検出）──────────────────────
 %hook YTInnerTubeCollectionViewController
 - (void)addSectionsFromArray:(NSArray *)array {
+    // YTAppCollectionViewController のフックが既にフィルタ済みなら素通し（二重走査防止）
+    if (_cf_appVCFiltering) { %orig; return; }
     id s = (id)self;
     NSString *vcCls = NSStringFromClass([s class]);
     CFWhitelistManager *wl = [CFWhitelistManager sharedManager];
-    BOOL isSub = [[NSUserDefaults standardUserDefaults] boolForKey:@"cf_is_subscription_tab"];
+    BOOL isSub = _cf_isSubscriptionTab;
 
     // YTAppCollectionViewController以外のVCをログ
     if (![vcCls isEqualToString:@"YTAppCollectionViewController"]) {
@@ -1139,7 +1256,7 @@ didUpdateWithPrevItems:(NSArray *)prev
     CFLog(@"[InnerTube-single] vcClass=%@", vcCls);
     CFWhitelistManager *wl = [CFWhitelistManager sharedManager];
     if ([wl isEmpty]) { %orig; return; }
-    BOOL isSub = [[NSUserDefaults standardUserDefaults] boolForKey:@"cf_is_subscription_tab"];
+    BOOL isSub = _cf_isSubscriptionTab;
     BOOL forceFilter = [vcCls containsString:@"Search"] || [vcCls containsString:@"search"];
     if (!forceFilter && isSub) { %orig; return; }
     if (cf_filterOneSectionInPlace(section, wl)) %orig;
@@ -1242,63 +1359,15 @@ didUpdateWithPrevItems:(NSArray *)prev
 + (UIImage *)imageNamed:(NSString *)name
                inBundle:(NSBundle *)bundle
 compatibleWithTraitCollection:(UITraitCollection *)tc {
-    if ([name isEqualToString:@"youtube_logo_dark_cairo"] ||
-        [name isEqualToString:@"youtube_premium_logo_dark_cairo"]) {
-        UIImage *i = cf_stardyLogo(YES); if (i) return i;
-    }
-    if ([name isEqualToString:@"youtube_premium_badge_light"] ||
-        [name isEqualToString:@"youtube_premium_standalone_cairo"]) {
-        UIImage *i = cf_stardyLogo(NO); if (i) return i;
-    }
-    if ([name isEqualToString:@"youtube_shorts_24_cairo"]          ||
-        [name isEqualToString:@"youtube_outline_experimental/shorts_24pt"] ||
-        [name isEqualToString:@"youtube_fill_experimental/shorts_24pt"]    ||
-        [name isEqualToString:@"ic_shorts_logo"]                   ||
-        [name isEqualToString:@"youtube_shorts_logo"]              ||
-        [name isEqualToString:@"shorts_logo"]                      ||
-        [name isEqualToString:@"reel_logo"]) {
-        UIImage *i = cf_shortsLogo(); if (i) return i;
-    }
-    return %orig;
+    UIImage *i = cf_replacementImage(name);
+    return i ?: %orig;
 }
 + (UIImage *)imageNamed:(NSString *)name inBundle:(NSBundle *)bundle {
-    if ([name isEqualToString:@"youtube_logo_dark_cairo"] ||
-        [name isEqualToString:@"youtube_premium_logo_dark_cairo"]) {
-        UIImage *i = cf_stardyLogo(YES); if (i) return i;
-    }
-    if ([name isEqualToString:@"youtube_premium_badge_light"] ||
-        [name isEqualToString:@"youtube_premium_standalone_cairo"]) {
-        UIImage *i = cf_stardyLogo(NO); if (i) return i;
-    }
-    if ([name isEqualToString:@"youtube_shorts_24_cairo"]          ||
-        [name isEqualToString:@"youtube_outline_experimental/shorts_24pt"] ||
-        [name isEqualToString:@"youtube_fill_experimental/shorts_24pt"]    ||
-        [name isEqualToString:@"ic_shorts_logo"]                   ||
-        [name isEqualToString:@"youtube_shorts_logo"]              ||
-        [name isEqualToString:@"shorts_logo"]                      ||
-        [name isEqualToString:@"reel_logo"]) {
-        UIImage *i = cf_shortsLogo(); if (i) return i;
-    }
-    return %orig;
+    UIImage *i = cf_replacementImage(name);
+    return i ?: %orig;
 }
 + (UIImage *)imageNamed:(NSString *)name {
-    if ([name isEqualToString:@"youtube_logo_dark_cairo"] ||
-        [name isEqualToString:@"youtube_premium_logo_dark_cairo"]) {
-        UIImage *i = cf_stardyLogo(YES); if (i) return i;
-    }
-    if ([name isEqualToString:@"youtube_premium_badge_light"] ||
-        [name isEqualToString:@"youtube_premium_standalone_cairo"]) {
-        UIImage *i = cf_stardyLogo(NO); if (i) return i;
-    }
-    if ([name isEqualToString:@"youtube_shorts_24_cairo"]          ||
-        [name isEqualToString:@"youtube_outline_experimental/shorts_24pt"] ||
-        [name isEqualToString:@"youtube_fill_experimental/shorts_24pt"]    ||
-        [name isEqualToString:@"ic_shorts_logo"]                   ||
-        [name isEqualToString:@"youtube_shorts_logo"]              ||
-        [name isEqualToString:@"shorts_logo"]                      ||
-        [name isEqualToString:@"reel_logo"]) {
-        UIImage *i = cf_shortsLogo(); if (i) return i;
-    }
-    return %orig;
+    UIImage *i = cf_replacementImage(name);
+    return i ?: %orig;
 }
 %end

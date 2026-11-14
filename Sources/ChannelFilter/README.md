@@ -96,3 +96,19 @@ make package JAILBROKEN=0 YOUTUBE_VERSION=20.44.2 UYOU_VERSION=3.0.4
   実際のメソッド名は `class-dump` や `Frida` で確認することを推奨します。
 - `ASCollectionView` のフックはパフォーマンスに影響する可能性があります。  
   重い場合は `kChannelFilterHideHome` をOFFにしてください。
+
+---
+
+## パフォーマンスとデバッグビルド
+
+通常ビルドでは、フィード読み込みを遅くしていたデバッグ機能（`CFLog` のログ保存、
+画面上の「CF Logs」ボタン、起動時の全クラススキャン）は無効です。
+
+調査が必要なときだけ、以下のように `CF_DEBUG=1` を付けてビルドしてください。
+
+```bash
+make package CF_DEBUG=1 JAILBROKEN=0 YOUTUBE_VERSION=20.44.2 UYOU_VERSION=3.0.4
+```
+
+UI層フィルタ（`YTAsyncCollectionView -layoutSubviews`）はセルごとの判定結果を
+キャッシュしており、許可判定のセルは 0.5 秒に1回だけ再判定されます。

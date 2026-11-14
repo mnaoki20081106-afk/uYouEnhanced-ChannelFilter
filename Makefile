@@ -33,6 +33,10 @@ $(TWEAK_NAME)_FILES := $(wildcard Sources/*.xm) $(wildcard Sources/*.x) $(wildca
 $(TWEAK_NAME)_FRAMEWORKS = UIKit Foundation AVFoundation AVKit Photos Accelerate CoreMotion GameController VideoToolbox Security
 $(TWEAK_NAME)_LIBRARIES = bz2 c++ iconv z
 $(TWEAK_NAME)_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-unused-but-set-variable -DTWEAK_VERSION=\"$(PACKAGE_VERSION)\"
+# ChannelFilter のデバッグログ/「CF Logs」ボタンを有効にする: make package CF_DEBUG=1
+ifeq ($(CF_DEBUG),1)
+$(TWEAK_NAME)_CFLAGS += -DCF_DEBUG=1
+endif
 $(TWEAK_NAME)_INJECT_DYLIBS = \
     Tweaks/uYou/Library/MobileSubstrate/DynamicLibraries/uYou.dylib \
     $(THEOS_OBJ_DIR)/libFLEX.dylib \
