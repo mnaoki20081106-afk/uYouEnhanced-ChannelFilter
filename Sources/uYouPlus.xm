@@ -1124,10 +1124,16 @@ static NSMutableArray <YTIItemSectionRenderer *> *filteredArray(NSArray <YTIItem
 %hook YTRightNavigationButtons
 - (void)layoutSubviews {
     %orig;
-    if (IS_ENABLED(@"hideNotificationButton_enabled")) {
+    // respondsToSelector: で確認してから呼ぶ。
+    // sponsorBlockButton は iSponsorBlock が追加するプロパティで、このビルドには
+    // iSponsorBlock が入っていないため、設定がONだと起動直後に
+    // "unrecognized selector" で落ちていた。
+    if (IS_ENABLED(@"hideNotificationButton_enabled") &&
+        [self respondsToSelector:@selector(notificationButton)]) {
         self.notificationButton.hidden = YES;
     }
-    if (IS_ENABLED(kHideiSponsorBlockButton)) { 
+    if (IS_ENABLED(kHideiSponsorBlockButton) &&
+        [self respondsToSelector:@selector(sponsorBlockButton)]) {
         self.sponsorBlockButton.hidden = YES;
         self.sponsorBlockButton.frame = CGRectZero;
     }
