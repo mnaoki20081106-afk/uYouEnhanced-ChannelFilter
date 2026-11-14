@@ -275,6 +275,27 @@ jobs:
           THEOS: ${{ github.workspace }}/theos
           UYOU_VERSION: ${{ inputs.uyou_version }}
 
+      - name: Inspect injected binaries (diagnostics)
+        if: always()
+        continue-on-error: true
+        run: |
+          xcodebuild -version || true
+          cd ${{ github.workspace }}/main
+          rm -rf /tmp/inspect && mkdir -p /tmp/inspect
+          unzip -q packages/*.ipa -d /tmp/inspect
+          APP=$(ls -d /tmp/inspect/Payload/*.app)
+          echo "==> main binary load commands (non-system)"
+          otool -L "$APP/YouTube" | grep -v '/System/Library\|/usr/lib/' || true
+          echo "==> Frameworks"
+          ls -la "$APP/Frameworks"
+          for f in "$APP"/Frameworks/*.dylib "$APP"/Frameworks/*.framework/*; do
+            [ -f "$f" ] || continue
+            file "$f" | grep -q Mach-O || continue
+            echo "---- $(basename "$f")"
+            otool -L "$f" | tail -n +2 | grep -v '/System/Library/Frameworks\|/usr/lib/libobjc\|/usr/lib/libSystem\|/usr/lib/libc++' || true
+            vtool -show-build "$f" 2>/dev/null | grep -E 'platform|minos' | head -2 || true
+          done
+
       - name: Upload Artifact
         if: ${{ inputs.upload_artifact }}
         uses: actions/upload-artifact@v4
