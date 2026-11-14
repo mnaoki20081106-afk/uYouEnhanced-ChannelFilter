@@ -294,6 +294,7 @@ jobs:
             echo "---- $(basename "$f")"
             otool -L "$f" | tail -n +2 | grep -v '/System/Library/Frameworks\|/usr/lib/libobjc\|/usr/lib/libSystem\|/usr/lib/libc++' || true
             vtool -show-build "$f" 2>/dev/null | grep -E 'platform|minos' | head -2 || true
+            otool -l "$f" | grep -A2 LC_RPATH | grep ' path ' || true
           done
 
       - name: Upload Artifact
