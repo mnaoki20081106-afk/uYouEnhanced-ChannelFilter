@@ -17,6 +17,7 @@
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
+#import <objc/message.h>
 #import "ChannelWhitelist.h"
 
 // ─── 前方宣言 ─────────────────────────────────────────────────────────────────
@@ -598,6 +599,34 @@ static BOOL cf_cellNodeShouldBlock(id node, CFWhitelistManager *wl, CFTimeInterv
     return v->blocked;
 }
 
+// ─── ヘルパー: アイテムから elementData を取り出す ─────────────────────────────
+// protobuf(GPB) の getter は、値が無くても空のオブジェクトを返す（nil にならない）。
+// そのため "elementRenderer に応答する" だけで判定すると、続きを読み込むための
+// continuationItemRenderer 等まで「チャンネルID無し」として消してしまい、
+// 次のページが読み込まれずにグルグルが止まらなくなる。
+// hasElementRenderer が NO のアイテムは nil を返し、呼び出し側で残す。
+static NSData *cf_elementDataOfItem(id item) {
+    static SEL erSel, hasErSel, edSel;
+    if (!erSel) {
+        erSel    = NSSelectorFromString(@"elementRenderer");
+        hasErSel = NSSelectorFromString(@"hasElementRenderer");
+        edSel    = NSSelectorFromString(@"elementData");
+    }
+    if (![item respondsToSelector:erSel]) return nil;
+    if ([item respondsToSelector:hasErSel]) {
+        BOOL (*hasFn)(id, SEL) = (BOOL (*)(id, SEL))objc_msgSend;
+        if (!hasFn(item, hasErSel)) return nil;
+    }
+    #pragma clang diagnostic push
+    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+    id er = [item performSelector:erSel];
+    if (!er || ![er respondsToSelector:edSel]) return nil;
+    id ed = [er performSelector:edSel];
+    #pragma clang diagnostic pop
+    if (![ed isKindOfClass:[NSData class]] || [(NSData *)ed length] == 0) return nil;
+    return (NSData *)ed;
+}
+
 // ─── ヘルパー: Model層セクション1件フィルタリング ────────────────────────────
 static BOOL cf_filterOneSectionInPlace(id section, CFWhitelistManager *wl) {
     NSString *secCls = NSStringFromClass([section class]);
@@ -623,19 +652,9 @@ static BOOL cf_filterOneSectionInPlace(id section, CFWhitelistManager *wl) {
 
     NSMutableIndexSet *toRemove = [NSMutableIndexSet indexSet];
     for (NSUInteger ii = 0; ii < items.count; ii++) {
-        id item = items[ii];
-        if (![item respondsToSelector:@selector(elementRenderer)]) continue;
-        #pragma clang diagnostic push
-        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-        id er = [item performSelector:@selector(elementRenderer)];
-        #pragma clang diagnostic pop
-        if (!er || ![er respondsToSelector:@selector(elementData)]) continue;
-        #pragma clang diagnostic push
-        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-        id ed = [er performSelector:@selector(elementData)];
-        #pragma clang diagnostic pop
-        if (!ed || ![ed isKindOfClass:[NSData class]]) continue;
-        NSString *ch = cf_extractChannelId((NSData *)ed);
+        NSData *ed = cf_elementDataOfItem(items[ii]);
+        if (!ed) continue; // 動画カード以外（続き読み込み等）は残す
+        NSString *ch = cf_extractChannelId(ed);
         if (!ch.length || ![wl isChannelAllowed:ch]) {
             [toRemove addIndex:ii];
             if (ch.length) CFLog(@"[Model-Layer] excluded ch=%@", ch);
@@ -656,68 +675,6 @@ static BOOL cf_filterOneSectionInPlace(id section, CFWhitelistManager *wl) {
         CFLog(@"[Model-Layer] %lu->%lu items", (unsigned long)items.count, (unsigned long)f.count);
     }
     return YES;
-}
-
-// ─── STARDYロゴ ──────────────────────────────────────────────────────────────
-// 画像はディスクから1回だけ読み、以後はメモリ上のものを返す
-static UIImage *cf_loadBundleImage(NSString *name, CGFloat scale) {
-    NSString *bPath = [[NSBundle mainBundle]
-        pathForResource:@"uYouPlus" ofType:@"bundle"];
-    NSBundle *b = bPath ? [NSBundle bundleWithPath:bPath] : nil;
-    NSString *path = [b pathForResource:name ofType:@"png"];
-    if (!path) return nil;
-    UIImage *raw = [UIImage imageWithContentsOfFile:path];
-    if (!raw) return nil;
-    return [UIImage imageWithCGImage:raw.CGImage scale:scale
-                         orientation:UIImageOrientationUp];
-}
-
-static UIImage *cf_stardyLogo(BOOL dark) {
-    static UIImage *darkImg, *liteImg;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        darkImg = cf_loadBundleImage(@"PremiumLogo_dark", 2.0f);
-        liteImg = cf_loadBundleImage(@"PremiumLogo_lite", 2.0f);
-    });
-    return dark ? darkImg : liteImg;
-}
-
-static UIImage *cf_shortsLogo(void) {
-    static UIImage *img;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        img = cf_loadBundleImage(@"ShortsLogo", 10.0f);
-    });
-    return img;
-}
-
-// imageNamed: は非常に頻繁に呼ばれるので、置き換え対象かどうかを
-// 文字列比較の連鎖ではなくハッシュ1回の引き当てで判定する
-static UIImage *cf_replacementImage(NSString *name) {
-    static NSDictionary<NSString *, NSNumber *> *map;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        map = @{
-            @"youtube_logo_dark_cairo":                  @1,
-            @"youtube_premium_logo_dark_cairo":          @1,
-            @"youtube_premium_badge_light":              @2,
-            @"youtube_premium_standalone_cairo":         @2,
-            @"youtube_shorts_24_cairo":                  @3,
-            @"youtube_outline_experimental/shorts_24pt": @3,
-            @"youtube_fill_experimental/shorts_24pt":    @3,
-            @"ic_shorts_logo":                           @3,
-            @"youtube_shorts_logo":                      @3,
-            @"shorts_logo":                              @3,
-            @"reel_logo":                                @3,
-        };
-    });
-    if (!name) return nil;
-    switch (map[name].intValue) {
-        case 1:  return cf_stardyLogo(YES);
-        case 2:  return cf_stardyLogo(NO);
-        case 3:  return cf_shortsLogo();
-        default: return nil;
-    }
 }
 
 // ─── ショートタブ フィルター（Model層）────────────────────────────────────────
@@ -1134,20 +1091,10 @@ didUpdateWithPrevItems:(NSArray *)prev
 
         NSMutableIndexSet *toRemoveItems = [NSMutableIndexSet indexSet];
         for (NSUInteger ii = 0; ii < items.count; ii++) {
-            id item = items[ii];
-            if (![item respondsToSelector:@selector(elementRenderer)]) continue;
-            #pragma clang diagnostic push
-            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-            id er = [item performSelector:@selector(elementRenderer)];
-            #pragma clang diagnostic pop
-            if (!er || ![er respondsToSelector:@selector(elementData)]) continue;
-            #pragma clang diagnostic push
-            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-            id ed = [er performSelector:@selector(elementData)];
-            #pragma clang diagnostic pop
-            if (!ed || ![ed isKindOfClass:[NSData class]]) continue;
+            NSData *ed = cf_elementDataOfItem(items[ii]);
+            if (!ed) continue; // 動画カード以外（続き読み込み等）は残す
 
-            NSString *channelId = cf_extractChannelId((NSData *)ed);
+            NSString *channelId = cf_extractChannelId(ed);
             if (!channelId.length) {
                 if (shouldFilter) [toRemoveItems addIndex:ii];
                 continue;
@@ -1349,23 +1296,5 @@ didUpdateWithPrevItems:(NSArray *)prev
             for (UIView *sub in v.subviews) [stack addObject:sub];
         }
     });
-}
-%end
-
-// ─── ロゴ置き換え ─────────────────────────────────────────────────────────────
-%hook UIImage
-+ (UIImage *)imageNamed:(NSString *)name
-               inBundle:(NSBundle *)bundle
-compatibleWithTraitCollection:(UITraitCollection *)tc {
-    UIImage *i = cf_replacementImage(name);
-    return i ?: %orig;
-}
-+ (UIImage *)imageNamed:(NSString *)name inBundle:(NSBundle *)bundle {
-    UIImage *i = cf_replacementImage(name);
-    return i ?: %orig;
-}
-+ (UIImage *)imageNamed:(NSString *)name {
-    UIImage *i = cf_replacementImage(name);
-    return i ?: %orig;
 }
 %end
