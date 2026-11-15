@@ -37,6 +37,9 @@
 @interface YTReelWatchRootViewController : UIViewController
 @end
 @interface YTPivotBarViewController : UIViewController
+- (void)selectItemWithPivotIdentifier:(NSString *)pivotIdentifier;
+@end
+@interface YTPivotBarView : UIView
 @end
 @interface YTSearchResultsViewController : UIViewController
 @end
@@ -835,7 +838,75 @@ didUpdateWithPrevItems:(NSArray *)prev
 %end
 
 // ─── タブバー判定（iPhone）────────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════════════
+// ホーム（おすすめ）を使わず、登録チャンネルのフィードを最初から開く
+//   おすすめを全部ダウンロードしてから端末側で捨てる方式だと、登録チャンネルの
+//   動画が揃うまで何ページも読むことになり遅い。登録チャンネルのフィード
+//   (FEsubscriptions) はサーバー側で既に登録チャンネルの動画だけなので、
+//   捨てる処理も待ち時間も発生しない。
+//   手法は YTLite / uYouEnhanced の「Hide Home Tab」と同じ。
+// ════════════════════════════════════════════════════════════════════════════
+static NSString *const kCFHomeId = @"FEwhat_to_watch";
+static NSString *const kCFSubsId = @"FEsubscriptions";
+
+%hook YTPivotBarView
+- (void)setRenderer:(id)renderer {
+    @try {
+        SEL itemsSel = NSSelectorFromString(@"itemsArray");
+        SEL itemSel  = NSSelectorFromString(@"pivotBarItemRenderer");
+        SEL idSel    = NSSelectorFromString(@"pivotIdentifier");
+        if ([renderer respondsToSelector:itemsSel]) {
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            NSMutableArray *items = [renderer performSelector:itemsSel];
+            if ([items isKindOfClass:[NSMutableArray class]]) {
+                BOOL hasSubs = NO;
+                NSUInteger homeIndex = NSNotFound;
+                for (NSUInteger i = 0; i < items.count; i++) {
+                    id item = items[i];
+                    if (![item respondsToSelector:itemSel]) continue;
+                    id r = [item performSelector:itemSel];
+                    if (![r respondsToSelector:idSel]) continue;
+                    NSString *pid = [r performSelector:idSel];
+                    if ([pid isEqualToString:kCFHomeId]) homeIndex = i;
+                    if ([pid isEqualToString:kCFSubsId]) hasSubs = YES;
+                }
+                // 登録チャンネルタブがある場合だけホームを外す（タブが無くなる事故を防ぐ）
+                if (homeIndex != NSNotFound && hasSubs) {
+                    [items removeObjectAtIndex:homeIndex];
+                }
+            }
+            #pragma clang diagnostic pop
+        }
+    } @catch (NSException *e) {
+        NSLog(@"[CF] PivotBarView setRenderer exception: %@", e);
+    }
+    %orig;
+}
+%end
+
+static BOOL _cf_startupTabSelected = NO;
+
 %hook YTPivotBarViewController
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    if (_cf_startupTabSelected) return;
+    _cf_startupTabSelected = YES;
+    id s = (id)self;
+    if ([s respondsToSelector:@selector(selectItemWithPivotIdentifier:)]) {
+        [s selectItemWithPivotIdentifier:kCFSubsId];
+    }
+}
+
+// ロゴのタップなど、ほかの経路でホームが選ばれても登録チャンネルに振り替える
+- (void)selectItemWithPivotIdentifier:(NSString *)pivotIdentifier {
+    if ([pivotIdentifier isEqualToString:kCFHomeId]) {
+        %orig(kCFSubsId);
+        return;
+    }
+    %orig;
+}
+
 - (void)navigateToItemWithEndpoint:(id)ep animated:(BOOL)a {
     %orig;
     if (!ep) return;
