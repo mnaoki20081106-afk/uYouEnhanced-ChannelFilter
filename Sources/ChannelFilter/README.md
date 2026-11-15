@@ -112,19 +112,3 @@ make package CF_DEBUG=1 JAILBROKEN=0 YOUTUBE_VERSION=20.44.2 UYOU_VERSION=3.0.4
 
 UI層フィルタ（`YTAsyncCollectionView -layoutSubviews`）はセルごとの判定結果を
 キャッシュしており、許可判定のセルは 0.5 秒に1回だけ再判定されます。
-
----
-
-## 登録チャンネルフィードを最初から開く（ホーム非表示）
-
-おすすめ（ホーム, `FEwhat_to_watch`）を読み込んでから登録外を捨てる方式は、
-登録チャンネルの動画が揃うまで何ページも読むため遅くなります。
-そこで以下を行い、最初から登録チャンネルのフィード（`FEsubscriptions`）を開きます。
-サーバー側で既に登録チャンネルの動画だけになっているため、待ち時間がほぼありません。
-
-- `YTPivotBarView -setRenderer:` でタブバーからホームタブを外す（登録チャンネルタブがある場合のみ）
-- `YTPivotBarViewController -viewDidAppear:` で起動時に登録チャンネルタブを選択
-- `YTPivotBarViewController -selectItemWithPivotIdentifier:` でホームへの切り替えを登録チャンネルに振り替え
-
-手法は YTLite（dayanch96/YTLite の Startup Tab / Remove Tabs）と uYouEnhanced の Hide Home Tab と同じです。
-検索・関連動画などのフィルタはこれまで通り残っています。
