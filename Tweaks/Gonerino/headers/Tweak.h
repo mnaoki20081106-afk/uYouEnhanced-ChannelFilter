@@ -1,0 +1,262 @@
+#import <Foundation/Foundation.h>
+#import <UIKit/UIKit.h>
+#import <objc/runtime.h>
+
+#import "ChannelManager.h"
+#import "Util.h"
+#import "VideoManager.h"
+
+@class _ASCollectionViewCell;
+@class ASDisplayNode;
+@class ASCellNode;
+@class ASLayoutElementStyle;
+@class ASCollectionView;
+@class ASTextNode;
+@class ELMImageNode;
+@class YTImageView;
+@class YTThumbnailController;
+@class YTWatchController;
+@class YTSingleVideoController;
+@class YTDefaultSheetController;
+@class YTActionSheetAction;
+@class YTToastResponderEvent;
+@class YTSettingsCell;
+@class YTQTMButton;
+@class YTShortsPlayerViewController;
+@class YTReelPlayerViewController;
+
+NS_ASSUME_NONNULL_BEGIN
+
+@interface ASCollectionView : UICollectionView
+
+@property (nonatomic, weak, nullable) id asyncDataSource;
+- (nullable id)collectionNode;
+- (nullable NSIndexPath *)convertIndexPathToCollectionNode:(NSIndexPath *)indexPath;
+
+@end
+
+@interface _ASCollectionViewCell : UICollectionViewCell
+
+- (nullable ASDisplayNode *)node;
+
+@end
+
+@interface ASDisplayNode : NSObject
+
+@property (nonatomic, copy, nullable) NSString     *accessibilityLabel;
+@property (nonatomic, copy, nullable) NSString     *accessibilityIdentifier;
+@property (nonatomic, assign, getter=isHidden) BOOL hidden;
+@property (nonatomic, assign) CGFloat               alpha;
+@property (nonatomic, assign) CGRect                frame;
+@property (nonatomic, assign) CGRect                bounds;
+- (ASLayoutElementStyle *)style;
+
+- (nullable NSArray<ASDisplayNode *> *)subnodes;
+- (nullable id)controller;
+- (nullable UIView *)view;
+
+@end
+
+@interface ASCellNode : ASDisplayNode
+
+@property (nonatomic, strong) UICollectionViewLayoutAttributes *layoutAttributes;
+
+@end
+
+@interface ASCollectionNode : ASDisplayNode
+
+- (void)reloadData;
+- (void)reloadDataWithCompletion:(void (^)(void))completion;
+- (void)reloadItemsAtIndexPaths:(NSArray<NSIndexPath *> *)indexPaths;
+
+@end
+
+@interface ELMImageNode : ASDisplayNode
+
+- (id)downloadImageWithURL:(NSURL *)url
+               shouldRetry:(BOOL)shouldRetry
+             callbackQueue:(id)queue
+          downloadProgress:(id)progress
+                completion:(id)completion;
+- (void)cachedImageWithURL:(NSURL *)url callbackQueue:(id)queue completion:(id)completion;
+
+@end
+
+@interface ASLayoutElementStyle : NSObject
+
+@property (nonatomic, assign) CGSize preferredSize;
+
+@end
+
+@interface YTElementsCellController : NSObject
+- (nullable id)elementEntry;
+@end
+
+@interface ASTextNode : ASDisplayNode
+
+@property (nonatomic, copy, nullable) NSAttributedString *attributedText;
+
+@end
+
+@interface NSObject (ChannelName)
+
+- (nullable NSString *)channelName;
+- (nullable NSString *)ownerName;
+
+@end
+
+@interface                                                       YTWatchController : NSObject
+@property (nonatomic, strong, readonly) YTSingleVideoController *singleVideoController;
+- (YTSingleVideoController *)valueForKey:(NSString *)key;
+@end
+
+@interface                                      YTSingleVideoController : NSObject
+@property (nonatomic, copy, readonly) NSString *channelName;
+- (NSString *)valueForKey:(NSString *)key;
+@end
+
+@interface YTDefaultSheetController : NSObject
+- (void)addAction:(YTActionSheetAction *)action;
+- (void)dismiss;
+- (id)valueForKey:(NSString *)key;
+- (UIImage *)createBlockIconWithOriginalAction:(nullable YTActionSheetAction *)originalAction;
+- (UIViewController *)findViewControllerForView:(UIView *)view;
+- (void)extractChannelNameFromNode:(id)node completion:(void (^)(NSString *channelName))completion;
+- (nullable NSString *)extractVideoTitleFromNode:(id)node;
+- (NSArray<YTActionSheetAction *> *)actions;
+@end
+
+@interface                            YTActionSheetAction : NSObject
+@property (nonatomic, copy) NSString *title;
+@property (nonatomic, copy) void (^handler)(id);
+@property (nonatomic, strong) UIImage *iconImage;
+@property (nonatomic) BOOL             shouldDismissOnAction;
+
++ (instancetype)actionWithTitle:(NSString *)title
+                      iconImage:(UIImage *)iconImage
+                          style:(NSInteger)style
+                        handler:(void (^)(id))handler;
+
++ (instancetype)actionWithTitle:(NSString *)title
+                      iconImage:(UIImage *)iconImage
+                        handler:(void (^)(id))handler;
+
++ (instancetype)actionWithTitle:(NSString *)title
+                      iconImage:(UIImage *)iconImage
+             secondaryIconImage:(nullable UIImage *)secondaryIconImage
+        accessibilityIdentifier:(nullable NSString *)accessibilityIdentifier
+                        handler:(void (^)(void))handler;
+@end
+
+@interface YTActionSheetController : UIViewController
+- (void)presentFromView:(UIView *)view;
+- (NSArray<YTActionSheetAction *> *)actions;
+- (void)addAction:(YTActionSheetAction *)action;
+- (void)dismiss;
+- (UIViewController *)findViewControllerForView:(UIView *)view;
+@end
+
+@interface YTToastResponderEvent : NSObject
++ (instancetype)eventWithMessage:(NSString *)message firstResponder:(UIViewController *)responder;
+- (void)send;
+@end
+
+@interface YTSettingsSectionItem : NSObject
++ (instancetype)itemWithTitle:(NSString *)title
+             titleDescription:(nullable NSString *)titleDescription
+      accessibilityIdentifier:(nullable NSString *)accessibilityIdentifier
+              detailTextBlock:(nullable NSString * (^)(void) )detailTextBlock
+                  selectBlock:(BOOL (^)(YTSettingsCell *, NSUInteger))selectBlock
+                settingItemId:(NSUInteger)settingItemId;
+@end
+
+@interface                            YTICommand : NSObject
+@property (copy, nonatomic) NSString *description;
+@end
+
+@interface                       YTInlinePlaybackPlayerDescriptor : NSObject
+@property (retain, nonatomic) id navigationEndpoint;
+@end
+
+@interface                                YTASDPlayableEntry : NSObject
+@property (retain, nonatomic) YTICommand *navigationEndpoint;
+@property (nonatomic) BOOL                hasNavigationEndpoint;
+@property (copy, nonatomic) NSString     *description;
+@end
+
+@interface                                        YTElementsInlineMutedPlaybackView : NSObject
+@property (retain, nonatomic) YTASDPlayableEntry *asdPlayableEntry;
+@end
+
+@interface ELMContext : NSObject
+- (id)elementForKey:(NSString *)key;
+@end
+
+@interface                                ELMElement : NSObject
+@property (retain, nonatomic) id          properties;
+@property (retain, nonatomic) ELMContext *context;
+- (id)propertyForKey:(NSString *)key;
+- (NSDictionary *)allProperties;
+- (id)valueForKey:(NSString *)key;
+@end
+
+@interface                                  YTInlinePlaybackPlayerNode : ASDisplayNode
+@property (nonatomic, readonly) id          playbackView;
+@property (nonatomic, readonly) ELMElement *element;
+@property (nonatomic, readonly) ELMContext *context;
+- (id)playbackView;
+@end
+
+@interface                                           YTRightNavigationButtons : UIView
+@property (retain, nonatomic, nullable) YTQTMButton *actionButton;
+- (NSMutableArray *)buttons;
+- (NSMutableArray *)visibleButtons;
+- (void)actionButtonPressed:(UIButton *)sender;
+@end
+
+@interface YTQTMButton : UIButton
++ (instancetype)iconButton;
+- (void)enableNewTouchFeedback;
+@end
+
+@interface QTMIcon : NSObject
++ (UIImage *)tintImage:(UIImage *)image color:(UIColor *)color;
+@end
+
+@interface YTPageStyleController : NSObject
++ (NSInteger)pageStyle;
+@end
+
+@interface YTAppDelegate : NSObject
+@end
+
+@interface YTAppViewControllerImpl : NSObject
+- (NSInteger)pageStyle;
+@end
+
+@interface YTShortsPlayerViewController : UIViewController
+- (nullable id)shortsContentView;
+- (nullable id)currentVideo;
+- (nullable NSString *)videoId;
+@end
+
+@interface YTReelPlayerViewController : UIViewController
+- (nullable id)contentView;
+- (nullable id)currentVideo;
+@end
+
+@interface YTShortsContentView : UIView
+@end
+
+@interface YTThumbnailController : NSObject
+- (instancetype)initWithImageView:(YTImageView *)imageView
+                             URLs:(NSDictionary *)URLs
+                     imageService:(id)imageService;
+@end
+
+@interface                     YTImageView : UIView
+@property (nonatomic, weak) id delegate;
+- (void)setImage:(UIImage *)image animated:(BOOL)animated;
+@end
+
+NS_ASSUME_NONNULL_END

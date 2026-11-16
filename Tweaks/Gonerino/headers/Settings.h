@@ -1,0 +1,63 @@
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+#import <YouTubeHeader/YTAlertView.h>
+#import <YouTubeHeader/YTAppSettingsSectionItemActionController.h>
+#import <YouTubeHeader/YTHotConfig.h>
+#import <YouTubeHeader/YTIIcon.h>
+#import <YouTubeHeader/YTSearchableSettingsViewController.h>
+#import <YouTubeHeader/YTSettingsGroupData.h>
+#import <YouTubeHeader/YTSettingsPickerViewController.h>
+#import <YouTubeHeader/YTSettingsSectionItem.h>
+#import <YouTubeHeader/YTSettingsSectionItemManager.h>
+#import <YouTubeHeader/YTSettingsViewController.h>
+#import <YouTubeHeader/YTUIUtils.h>
+#import <rootless.h>
+#import <version.h>
+
+#import "ChannelManager.h"
+#import "VideoManager.h"
+#import "WordManager.h"
+
+NS_ASSUME_NONNULL_BEGIN
+
+#define SECTION_HEADER(s)                                                                          \
+    [sectionItems                                                                                  \
+        addObject:[objc_getClass("YTSettingsSectionItem")                                          \
+                                itemWithTitle:@"\t"                                                \
+                             titleDescription:s                                                    \
+                      accessibilityIdentifier:nil                                                  \
+                              detailTextBlock:nil                                                  \
+                                  selectBlock:^BOOL(YTSettingsCell *cell,                          \
+                                                    NSUInteger sectionItemIndex) { return NO; }]]
+
+static const NSInteger SettingsCategory = 0x676e726e;
+
+#define TWEAK_VERSION PACKAGE_VERSION
+
+static BOOL isImportOperation = NO;
+
+@interface YTToastResponderEvent : NSObject
++ (instancetype)eventWithMessage:(NSString *)message firstResponder:(id)responder;
+- (void)send;
+@end
+
+@interface YTNavigationController : UINavigationController
+@end
+
+@interface YTSettingsViewController ()
+@property (nonatomic, strong, readonly, nullable) YTNavigationController *navigationController;
+@end
+
+@interface YTSettingsViewController (SettingsIntegration)
+- (void)setSectionItems:(nullable NSArray *)items
+            forCategory:(NSInteger)category
+                  title:(nullable NSString *)title
+       titleDescription:(nullable NSString *)titleDescription
+           headerHidden:(BOOL)headerHidden;
+@end
+
+@interface YTSettingsSectionItemManager (SettingsIntegration) <UIDocumentPickerDelegate>
+- (void)settingsIntegrationUpdateSectionWithEntry:(nullable id)entry;
+- (void)settingsIntegrationReloadSection;
+@end
+
+NS_ASSUME_NONNULL_END

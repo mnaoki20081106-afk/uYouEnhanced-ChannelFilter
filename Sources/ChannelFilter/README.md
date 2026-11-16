@@ -112,3 +112,20 @@ make package CF_DEBUG=1 JAILBROKEN=0 YOUTUBE_VERSION=20.44.2 UYOU_VERSION=3.0.4
 
 UI層フィルタ（`YTAsyncCollectionView -layoutSubviews`）はセルごとの判定結果を
 キャッシュしており、許可判定のセルは 0.5 秒に1回だけ再判定されます。
+
+---
+
+## フィードのフィルタ（Gonerino 方式に移行）
+
+ホーム・検索・関連動画などのフィードからの除外は、`Tweaks/Gonerino`
+（castdrian/Gonerino v1.8.10 を許可リスト方式に改変したもの, GPL-3.0）が行います。
+
+- 判定はチャンネル**名**。今の YouTube のフィード要素からはチャンネルID（UC…）が
+  安定して取れないため、ID による判定（旧 Model層/UI層フィルタ）は廃止しました。
+- 登録チャンネルタブを開くと、表示された動画のチャンネル名が許可リストに追加されます
+  （NSUserDefaults `CFSubscribedChannelNames`、追加のみ）。
+- 許可リストが空の間は何も除外しません（詰み防止）。
+
+このファイル（ChannelFilter.xm）に残っているもの:
+アカウント追加ブロック、登録ボタンの無効化、ショートのフィルタ（チャンネルID方式）、
+チャンネルIDの同期（ショート用）。
