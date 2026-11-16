@@ -581,6 +581,62 @@ static const CFTimeInterval kCFRecheckInterval = 0.5;
 static const char kCFVerdictKey = 0;
 static const char kCFScanPendingKey = 0;
 
+// ─── 診断用（CF_DEBUG=1 のときだけ使われる）──────────────────────────────────
+// バイト列から UC… 候補をすべて拾い、読める文字列の断片も取り出す。
+// 「チャンネルIDが取れない原因」を実機データで確認するためのもの。
+static NSString *cf_debugDescribeData(NSData *data) {
+    if (!data.length) return @"(empty)";
+    const uint8_t *b = (const uint8_t *)data.bytes;
+    NSUInteger len = data.length;
+    NSMutableOrderedSet *ucs = [NSMutableOrderedSet orderedSet];
+    NSUInteger ucCount = 0;
+    for (NSUInteger i = 0; i + 24 <= len; i++) {
+        if (b[i] != 'U' || b[i+1] != 'C') continue;
+        NSUInteger k = 2;
+        while (k < 24) {
+            uint8_t c = b[i+k];
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') ||
+                  (c >= 'A' && c <= 'Z') || c == '_' || c == '-')) break;
+            k++;
+        }
+        if (k == 24) {
+            ucCount++;
+            [ucs addObject:[[NSString alloc] initWithBytes:b+i length:24
+                                                  encoding:NSASCIIStringEncoding]];
+        }
+    }
+    // 読める文字列の断片（3バイト以上の連続）を最大20個
+    NSMutableArray *runs = [NSMutableArray array];
+    NSUInteger start = 0; BOOL in = NO;
+    for (NSUInteger i = 0; i <= len && runs.count < 20; i++) {
+        BOOL printable = (i < len) && (b[i] >= 0x20 && b[i] != 0x7f);
+        if (printable && !in) { start = i; in = YES; }
+        else if (!printable && in) {
+            in = NO;
+            if (i - start >= 3) {
+                NSData *sub = [data subdataWithRange:NSMakeRange(start, MIN(i - start, 80))];
+                NSString *str = [[NSString alloc] initWithData:sub encoding:NSUTF8StringEncoding]
+                             ?: [[NSString alloc] initWithData:sub encoding:NSISOLatin1StringEncoding];
+                if (str) [runs addObject:str];
+            }
+        }
+    }
+    NSArray *ucList = ucs.array;
+    if (ucList.count > 4) ucList = [ucList subarrayWithRange:NSMakeRange(0, 4)];
+    return [NSString stringWithFormat:@"len=%lu UC=%lu %@ | %@",
+            (unsigned long)len, (unsigned long)ucCount,
+            [ucList componentsJoinedByString:@","],
+            [runs componentsJoinedByString:@" | "]];
+}
+
+static void cf_debugLogWhitelist(NSString *when) {
+    if (!CF_DEBUG) return;
+    NSArray *ids = [[CFWhitelistManager sharedManager] allowedChannelIDs];
+    NSArray *head = ids.count > 8 ? [ids subarrayWithRange:NSMakeRange(0, 8)] : ids;
+    CFLog(@"[Diag] whitelist(%@) count=%lu ids=%@", when,
+          (unsigned long)ids.count, [head componentsJoinedByString:@","]);
+}
+
 static BOOL cf_cellNodeShouldBlock(id node, CFWhitelistManager *wl, CFTimeInterval now) {
     NSUInteger gen = wl.generation;
     CFNodeVerdict *v = objc_getAssociatedObject(node, &kCFVerdictKey);
@@ -596,6 +652,22 @@ static BOOL cf_cellNodeShouldBlock(id node, CFWhitelistManager *wl, CFTimeInterv
     v->generation = gen;
     v->checkedAt  = now;
     v->blocked    = cf_nodeShouldBlock(node, wl);
+    if (CF_DEBUG) {
+        static NSMutableSet *seen;
+        if (!seen) seen = [NSMutableSet set];
+        NSString *cls = NSStringFromClass([node class]);
+        NSString *key = [NSString stringWithFormat:@"%@/%d", cls, (int)v->blocked];
+        if (![seen containsObject:key] && seen.count < 60) {
+            [seen addObject:key];
+            NSString *ax = nil;
+            if ([node respondsToSelector:@selector(accessibilityLabel)]) {
+                ax = [node accessibilityLabel];
+            }
+            if (ax.length > 120) ax = [ax substringToIndex:120];
+            CFLog(@"[Diag-UI] node=%@ blocked=%d ch=%@ ax=%@", cls, (int)v->blocked,
+                  cf_channelIdFromNode(node) ?: @"(none)", ax ?: @"(none)");
+        }
+    }
     return v->blocked;
 }
 
@@ -1039,6 +1111,10 @@ didUpdateWithPrevItems:(NSArray *)prev
         CFLog(@"[AppVC] no browseId, fallback flag isSub=%d", (int)isSubscriptionFeed);
     }
 
+    if (CF_DEBUG) {
+        static dispatch_once_t wlOnce;
+        dispatch_once(&wlOnce, ^{ cf_debugLogWhitelist(@"startup"); });
+    }
     BOOL shouldFilter = !isSubscriptionFeed && ![wl isEmpty];
     CFLog(@"[AppVC] count=%lu shouldFilter=%d wlEmpty=%d",
           (unsigned long)array.count, (int)shouldFilter, (int)[wl isEmpty]);
@@ -1092,6 +1168,17 @@ didUpdateWithPrevItems:(NSArray *)prev
         NSMutableIndexSet *toRemoveItems = [NSMutableIndexSet indexSet];
         for (NSUInteger ii = 0; ii < items.count; ii++) {
             NSData *ed = cf_elementDataOfItem(items[ii]);
+            if (CF_DEBUG) {
+                static NSUInteger diagCount = 0;
+                if (diagCount < 40) {
+                    diagCount++;
+                    CFLog(@"[Diag-Item] tab=%@ si=%lu ii=%lu item=%@ %@",
+                          resolvedBrowseId ?: (isSubscriptionFeed ? @"(sub?)" : @"(?)"),
+                          (unsigned long)si, (unsigned long)ii,
+                          NSStringFromClass([items[ii] class]),
+                          ed ? cf_debugDescribeData(ed) : @"(no elementRenderer)");
+                }
+            }
             if (!ed) continue; // 動画カード以外（続き読み込み等）は残す
 
             NSString *channelId = cf_extractChannelId(ed);
@@ -1150,6 +1237,7 @@ didUpdateWithPrevItems:(NSArray *)prev
     if (isSubscriptionFeed && channelIdsForSync.count > 0) {
         [wl syncSubscribedChannelIDs:channelIdsForSync];
         CFLog(@"[Sync] ✅ %lu ids", (unsigned long)channelIdsForSync.count);
+        cf_debugLogWhitelist(@"after-sync");
     }
 }
 %end

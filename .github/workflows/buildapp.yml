@@ -41,6 +41,11 @@ on:
         default: false
         required: false
         type: boolean
+      cf_debug:
+        description: "ChannelFilter debug build (CF Logs button + diagnostics)"
+        default: false
+        required: false
+        type: boolean
       create_release:
         description: "Create a draft release"
         default: true
@@ -274,6 +279,7 @@ jobs:
         env:
           THEOS: ${{ github.workspace }}/theos
           UYOU_VERSION: ${{ inputs.uyou_version }}
+          CF_DEBUG: ${{ inputs.cf_debug && '1' || '0' }}
 
       - name: Inspect injected binaries (diagnostics)
         if: always()
