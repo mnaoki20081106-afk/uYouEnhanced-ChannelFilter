@@ -2,10 +2,15 @@
 //  ChannelFilter.xm
 //  uYouEnhanced - ChannelFilter
 //
-//  アーキテクチャ: ハイブリッド二重フィルタ
-//    Layer 1 (Model層): addSectionsFromArray: でデータがVCに渡る前に除外
-//    Layer 2 (UI層):    YTAsyncCollectionView.layoutSubviews で描画後に残ったセルを削除
-//                       → 検索・関連動画・エンドカード・キャッシュ動画を全てカバー
+//  アーキテクチャ: Model層フィルタのみ（元リポジトリ uYouEnhanced の filteredArray() 方式）
+//    YTInnerTubeCollectionViewController の addSectionsFromArray: /
+//    displaySectionsWithReloadingSectionControllerByRenderer: で、データがVCに渡る前に除外。
+//    ホーム・登録チャンネル・関連動画(YTWatchNextResultsViewController)はすべてこのサブクラス。
+//
+//  旧 Layer 2（YTAsyncCollectionView.layoutSubviews で deleteItemsAtIndexPaths:）は削除。
+//    データソースを変えずにセルだけ消すため Texture の件数と不整合になり、
+//    バッチ取得が完了しない＝永遠にぐるぐるの原因だった（Gonerino 本家もこの方式を捨て、
+//    データソース側でフィルタする方式に作り直している）。
 //
 //  制約:
 //    - %ctor を書かない（uYouPlus.xm の %init; で自動初期化）
@@ -17,6 +22,7 @@
 #import <UIKit/UIKit.h>
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
+#import <objc/message.h>
 #import "ChannelWhitelist.h"
 
 // ─── 前方宣言 ─────────────────────────────────────────────────────────────────
@@ -38,9 +44,6 @@
 @interface YTPivotBarViewController : UIViewController
 @end
 @interface YTSearchResultsViewController : UIViewController
-@end
-@interface YTAsyncCollectionView : UICollectionView
-- (void)removeOffendingCells;
 @end
 
 // ─── ログシステム ─────────────────────────────────────────────────────────────
@@ -252,7 +255,6 @@ static void cf_openLogViewer(void) {
 // ─── ClassScan: 起動時に全VCクラスをスキャン ──────────────────────────────────
 // addSectionsFromArray: / addSection: / setSections: を持つVCを全てログに出す。
 // CF Logsで「ClassScan」と検索すれば検索・関連動画VCのクラス名が一発で判明する。
-static BOOL _cf_globalDumped = NO; // VC再生成でリセットされないグローバルフラグ
 
 static void cf_scanSearchVCClasses(void) {
     unsigned int count = 0;
@@ -380,207 +382,187 @@ static NSString *cf_extractChannelId(NSData *data) {
     return m ? [raw substringWithRange:m.range] : nil;
 }
 
-// ─── ヘルパー: UI層ノードからchannelIdを抽出（Gonerino方式 + channelIdベース）─
-// YTVideoWithContextNode 系ノードの navigationEndpoint → Protobufバイナリから
-// UC...channelId を抽出して isChannelAllowed: で判定する。
-// isChannelNameAllowed: は使わない（ChannelWhitelist.h に存在しないため）。
+// ─── ヘルパー: browseId 解決 ──────────────────────────────────────────────────
+static NSString *cf_browseIdFromEndpoint(id ep) {
+    if (!ep || ![ep respondsToSelector:@selector(browseEndpoint)]) return nil;
+    #pragma clang diagnostic push
+    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+    id bep = [ep performSelector:@selector(browseEndpoint)];
+    if (!bep || ![bep respondsToSelector:@selector(browseId)]) return nil;
+    id bid = [bep performSelector:@selector(browseId)];
+    #pragma clang diagnostic pop
+    return ([bid isKindOfClass:[NSString class]] && [(NSString *)bid length]) ? bid : nil;
+}
 
-// ノードのnavigationEndpointからProtobufバイナリを取得してchannelIdを抽出
-static NSString *cf_channelIdFromNode(id node) {
-    if (!node) return nil;
-
-    // 1. navigationEndpoint → browseEndpoint → Protobufバイナリ
-    SEL navSel = NSSelectorFromString(@"navigationEndpoint");
-    if ([node respondsToSelector:navSel]) {
+// self → parentViewController を最大10段たどって browseId を探す
+static NSString *cf_resolveBrowseId(UIViewController *vc) {
+    UIViewController *cur = vc;
+    for (int d = 0; d <= 10 && cur; d++, cur = cur.parentViewController) {
+        if (![cur respondsToSelector:@selector(navigationEndpoint)]) continue;
         #pragma clang diagnostic push
         #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-        id ep = [node performSelector:navSel];
+        id ep = [cur performSelector:@selector(navigationEndpoint)];
         #pragma clang diagnostic pop
-        if (ep) {
-            // browseEndpoint
-            SEL bepSel = NSSelectorFromString(@"browseEndpoint");
-            if ([ep respondsToSelector:bepSel]) {
-                #pragma clang diagnostic push
-                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                id bep = [ep performSelector:bepSel];
-                #pragma clang diagnostic pop
-                // browseId が UC... 形式ならそのまま使う
-                if (bep) {
-                    SEL bidSel = NSSelectorFromString(@"browseId");
-                    if ([bep respondsToSelector:bidSel]) {
-                        #pragma clang diagnostic push
-                        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                        NSString *bid = [bep performSelector:bidSel];
-                        #pragma clang diagnostic pop
-                        if ([bid hasPrefix:@"UC"] && bid.length == 24) return bid;
-                    }
-                    // serializedDataを試す
-                    SEL dataSel = NSSelectorFromString(@"serializedData");
-                    if ([bep respondsToSelector:dataSel]) {
-                        #pragma clang diagnostic push
-                        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                        id data = [bep performSelector:dataSel];
-                        #pragma clang diagnostic pop
-                        if ([data isKindOfClass:[NSData class]]) {
-                            NSString *ch = cf_extractChannelId((NSData *)data);
-                            if (ch.length) return ch;
-                        }
-                    }
-                }
-            }
-            // reelWatchEndpoint → params → Base64デコード
-            SEL reelSel = NSSelectorFromString(@"reelWatchEndpoint");
-            if ([ep respondsToSelector:reelSel]) {
-                #pragma clang diagnostic push
-                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                id reelEP = [ep performSelector:reelSel];
-                #pragma clang diagnostic pop
-                if (reelEP) {
-                    // cf_channelIdFromReelEP と同じロジック
-                    SEL ps = NSSelectorFromString(@"params");
-                    if ([reelEP respondsToSelector:ps]) {
-                        #pragma clang diagnostic push
-                        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                        id pv = [reelEP performSelector:ps];
-                        #pragma clang diagnostic pop
-                        if ([pv isKindOfClass:[NSString class]]) {
-                            NSString *b64 = [(NSString *)pv
-                                stringByReplacingOccurrencesOfString:@"-" withString:@"+"];
-                            b64 = [b64 stringByReplacingOccurrencesOfString:@"_" withString:@"/"];
-                            NSInteger pad = 4 - (b64.length % 4);
-                            if (pad < 4) for (NSInteger i = 0; i < pad; i++)
-                                b64 = [b64 stringByAppendingString:@"="];
-                            NSData *dec = [[NSData alloc] initWithBase64EncodedString:b64 options:0];
-                            if (dec) {
-                                NSString *str = [[NSString alloc] initWithData:dec
-                                    encoding:NSISOLatin1StringEncoding];
-                                if (str) {
-                                    NSTextCheckingResult *m = [cf_channelIdRegex()
-                                        firstMatchInString:str options:0
-                                        range:NSMakeRange(0, str.length)];
-                                    if (m) return [str substringWithRange:m.range];
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        NSString *bid = cf_browseIdFromEndpoint(ep);
+        if (bid) return bid;
     }
-
-    // 2. serializedData を直接持つ場合
-    SEL sdSel = NSSelectorFromString(@"serializedData");
-    if ([node respondsToSelector:sdSel]) {
-        #pragma clang diagnostic push
-        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-        id data = [node performSelector:sdSel];
-        #pragma clang diagnostic pop
-        if ([data isKindOfClass:[NSData class]]) {
-            NSString *ch = cf_extractChannelId((NSData *)data);
-            if (ch.length) return ch;
-        }
-    }
-
     return nil;
 }
 
-// ─── ヘルパー: ノードがブロック対象か判定（channelIdベース）────────────────────
-// isChannelAllowed: で判定する。チャンネル名は使わない。
-static BOOL cf_nodeShouldBlock(id node, CFWhitelistManager *wl) {
-    if (!node || [wl isEmpty]) return NO;
-
-    // 動画ノード系のみ対象（広告・UIパーツ等の誤検知を防ぐ）
-    NSString *nodeCls = NSStringFromClass([node class]);
-    BOOL isVideoNode = ([nodeCls containsString:@"VideoWithContext"] ||
-                        [nodeCls containsString:@"CompactVideo"]     ||
-                        [nodeCls containsString:@"GridVideo"]        ||
-                        [nodeCls containsString:@"SearchResult"]     ||
-                        [nodeCls containsString:@"VideoCell"]);
-
-    if (isVideoNode) {
-        NSString *channelId = cf_channelIdFromNode(node);
-        if (channelId.length) {
-            BOOL allowed = [wl isChannelAllowed:channelId];
-            if (!allowed) CFLog(@"[UI-Layer] blocked channelId=%@", channelId);
-            return !allowed;
-        }
-        // channelId取得不可 → 念のためブロック（広告・ショート等）
-        CFLog(@"[UI-Layer] no channelId for node=%@, blocking", nodeCls);
-        return YES;
-    }
-
-    // 動画ノードでない場合はサブノードを再帰チェック（最大2段）
-    SEL subSel = NSSelectorFromString(@"subnodes");
-    if ([node respondsToSelector:subSel]) {
-        #pragma clang diagnostic push
-        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-        NSArray *subs = [node performSelector:subSel];
-        #pragma clang diagnostic pop
-        for (id sub in subs) {
-            if (cf_nodeShouldBlock(sub, wl)) return YES;
-        }
-    }
-    return NO;
-}
-
-// ─── ヘルパー: Model層セクション1件フィルタリング ────────────────────────────
-static BOOL cf_filterOneSectionInPlace(id section, CFWhitelistManager *wl) {
-    NSString *secCls = NSStringFromClass([section class]);
-    if ([secCls containsString:@"FilterChip"] ||
-        [secCls containsString:@"ChipBar"])   return YES;
-
-    // ShelfRenderer はセクションごと除去（ショートシェルフ等）
-    if ([secCls isEqualToString:@"YTIShelfRenderer"] ||
-        [secCls containsString:@"ShelfRenderer"]     ||
-        [secCls containsString:@"Shelf"]             ||
-        [secCls containsString:@"Reel"]              ||
-        [secCls containsString:@"Short"]) {
-        CFLog(@"[Model-Layer] Shelf/Reel/Short section removed cls=%@", secCls);
-        return NO;
-    }
-
-    if (![section respondsToSelector:@selector(contentsArray)]) return YES;
+// ─── ヘルパー: 実在する elementRenderer の elementData だけを返す ─────────────
+// YTIItemSectionSupportedRenderers は GPBMessage。未設定のメッセージ型フィールドの
+// getter は nil ではなく「空のインスタンス」を返すため、respondsToSelector: だけでは
+// 継続読み込み(continuation)等の非ELMアイテムも「elementRendererあり・channelIdなし」
+// に見えてしまう。必ず hasElementRenderer で存在を確認する。
+static NSData *cf_elementDataForItem(id item) {
+    if (!item || ![item respondsToSelector:@selector(elementRenderer)]) return nil;
+    SEL hasSel = NSSelectorFromString(@"hasElementRenderer");
+    if ([item respondsToSelector:hasSel] &&
+        !((BOOL (*)(id, SEL))objc_msgSend)(item, hasSel)) return nil;
     #pragma clang diagnostic push
     #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-    NSArray *items = [section performSelector:@selector(contentsArray)];
+    id er = [item performSelector:@selector(elementRenderer)];
+    if (!er || ![er respondsToSelector:@selector(elementData)]) return nil;
+    id ed = [er performSelector:@selector(elementData)];
     #pragma clang diagnostic pop
-    if (!items.count) return YES;
+    if (![ed isKindOfClass:[NSData class]] || [(NSData *)ed length] == 0) return nil;
+    return (NSData *)ed;
+}
 
-    NSMutableIndexSet *toRemove = [NSMutableIndexSet indexSet];
-    for (NSUInteger ii = 0; ii < items.count; ii++) {
-        id item = items[ii];
-        if (![item respondsToSelector:@selector(elementRenderer)]) continue;
-        #pragma clang diagnostic push
-        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-        id er = [item performSelector:@selector(elementRenderer)];
-        #pragma clang diagnostic pop
-        if (!er || ![er respondsToSelector:@selector(elementData)]) continue;
-        #pragma clang diagnostic push
-        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-        id ed = [er performSelector:@selector(elementData)];
-        #pragma clang diagnostic pop
-        if (!ed || ![ed isKindOfClass:[NSData class]]) continue;
-        NSString *ch = cf_extractChannelId((NSData *)ed);
-        if (!ch.length || ![wl isChannelAllowed:ch]) {
-            [toRemove addIndex:ii];
-            if (ch.length) CFLog(@"[Model-Layer] excluded ch=%@", ch);
+// channelId を持たない ELM 要素が「動画カード」かどうか（テンプレート名で判定）
+// 例: compact_video.eml（uYouPlus.xm の Shorts 判定でも使われている名前）
+static BOOL cf_elementLooksLikeVideo(id item) {
+    static NSRegularExpression *re;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        re = [NSRegularExpression
+            regularExpressionWithPattern:@"[A-Za-z0-9_]*(video|shorts|reel)[A-Za-z0-9_]*\\.eml"
+                                 options:NSRegularExpressionCaseInsensitive error:nil];
+    });
+    #pragma clang diagnostic push
+    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+    id er = [item performSelector:@selector(elementRenderer)];
+    #pragma clang diagnostic pop
+    NSString *desc = [er description];
+    if (!desc.length) return NO;
+    return [re firstMatchInString:desc options:0 range:NSMakeRange(0, desc.length)] != nil;
+}
+
+// ─── フィードのモード判定 ─────────────────────────────────────────────────────
+typedef NS_ENUM(NSInteger, CFFeedMode) {
+    CFFeedModePassThrough = 0, // 何もしない（ホワイトリスト空 = 詰み防止）
+    CFFeedModeSync,            // 登録チャンネルタブ: 一切削らず channelId を収集するだけ
+    CFFeedModeFilter,          // それ以外: ホワイトリスト外を除外
+};
+
+static CFFeedMode cf_feedModeForVC(UIViewController *vc, NSString **outBrowseId) {
+    NSString *cls = NSStringFromClass([vc class]);
+    BOOL isSearch = [cls rangeOfString:@"Search" options:NSCaseInsensitiveSearch].location != NSNotFound;
+    NSString *bid = isSearch ? nil : cf_resolveBrowseId(vc);
+    if (outBrowseId) *outBrowseId = bid;
+
+    BOOL isSub;
+    if (isSearch)        isSub = NO;
+    else if (bid.length) isSub = [bid isEqualToString:@"FEsubscriptions"];
+    else                 isSub = [[NSUserDefaults standardUserDefaults]
+                                     boolForKey:@"cf_is_subscription_tab"];
+
+    if (isSub) return CFFeedModeSync;
+    return [[CFWhitelistManager sharedManager] isEmpty] ? CFFeedModePassThrough
+                                                        : CFFeedModeFilter;
+}
+
+static BOOL cf_isShelfLikeSection(NSString *secCls) {
+    return [secCls containsString:@"Shelf"] ||
+           [secCls containsString:@"Reel"]  ||
+           [secCls containsString:@"Short"];
+}
+
+// ─── セクション配列の処理（全フックの共通入口）──────────────────────────────
+// 元リポジトリ(uYouEnhanced/YouTube-X)の filteredArray() と同じく、
+//   * contentsArray をその場で削る（モデルの同一性を保つ）
+//   * 判定できない非ELMアイテム（continuation=次ページ読み込み等）は絶対に消さない
+// Sync モードでは一切削らない（登録チャンネルタブのぐるぐる対策）。
+static NSArray *cf_processSections(NSArray *array, CFFeedMode mode, NSString *tag) {
+    if (mode == CFFeedModePassThrough || !array.count) return array;
+
+    CFWhitelistManager *wl = [CFWhitelistManager sharedManager];
+    BOOL filter = (mode == CFFeedModeFilter);
+    NSMutableArray<NSString *> *syncIds = filter ? nil : [NSMutableArray array];
+    NSMutableIndexSet *dropSections = [NSMutableIndexSet indexSet];
+    NSUInteger removedItems = 0;
+
+    for (NSUInteger si = 0; si < array.count; si++) {
+        id section = array[si];
+        NSString *secCls = NSStringFromClass([section class]);
+
+        if ([secCls containsString:@"FilterChip"] || [secCls containsString:@"ChipBar"]) continue;
+
+        if (filter && cf_isShelfLikeSection(secCls)) {
+            [dropSections addIndex:si];
+            continue;
         }
-    }
 
-    if (toRemove.count == items.count) return NO;
+        if (![section respondsToSelector:@selector(contentsArray)]) continue;
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        NSArray *items = [section performSelector:@selector(contentsArray)];
+        #pragma clang diagnostic pop
+        if (![items isKindOfClass:[NSArray class]] || !items.count) continue;
 
-    if (toRemove.count > 0) {
-        NSMutableArray *f = [items mutableCopy];
-        [f removeObjectsAtIndexes:toRemove];
-        if ([section respondsToSelector:@selector(setContentsArray:)]) {
+        NSMutableIndexSet *toRemove = [NSMutableIndexSet indexSet];
+        NSUInteger elementCount = 0;
+        for (NSUInteger ii = 0; ii < items.count; ii++) {
+            id item = items[ii];
+            NSData *ed = cf_elementDataForItem(item);
+            if (!ed) continue;               // 非ELM（continuation 等）→ 常に残す
+            elementCount++;
+            NSString *ch = cf_extractChannelId(ed);
+            if (!filter) {
+                if (ch.length) [syncIds addObject:ch];
+                continue;
+            }
+            if (ch.length) {
+                if (![wl isChannelAllowed:ch]) [toRemove addIndex:ii];
+            } else if (cf_elementLooksLikeVideo(item)) {
+                [toRemove addIndex:ii];      // チャンネル不明の動画カード → 捨てる
+            }
+        }
+        if (!toRemove.count) continue;
+        removedItems += toRemove.count;
+
+        // 全アイテムが除外対象のELMならセクションごと消す（非ELMが残る場合は残す）
+        if (toRemove.count == items.count && elementCount == items.count) {
+            [dropSections addIndex:si];
+            continue;
+        }
+        if ([items isKindOfClass:[NSMutableArray class]]) {
+            [(NSMutableArray *)items removeObjectsAtIndexes:toRemove];
+        } else if ([section respondsToSelector:@selector(setContentsArray:)]) {
+            NSMutableArray *f = [items mutableCopy];
+            [f removeObjectsAtIndexes:toRemove];
             #pragma clang diagnostic push
             #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
             [section performSelector:@selector(setContentsArray:) withObject:f];
             #pragma clang diagnostic pop
         }
-        CFLog(@"[Model-Layer] %lu->%lu items", (unsigned long)items.count, (unsigned long)f.count);
     }
-    return YES;
+
+    if (!filter) {
+        if (syncIds.count) {
+            [wl syncSubscribedChannelIDs:syncIds];
+            CFLog(@"[%@] Sync %lu ids (whitelist=%lu)", tag,
+                  (unsigned long)syncIds.count, (unsigned long)[wl allowedChannelIDs].count);
+        }
+        return array;
+    }
+
+    if (!dropSections.count && !removedItems) return array;
+    NSMutableArray *out = [array mutableCopy];
+    [out removeObjectsAtIndexes:dropSections];
+    CFLog(@"[%@] sections %lu->%lu, items removed=%lu", tag,
+          (unsigned long)array.count, (unsigned long)out.count, (unsigned long)removedItems);
+    return out;
 }
 
 // ─── STARDYロゴ ──────────────────────────────────────────────────────────────
@@ -670,69 +652,6 @@ static NSArray *cf_filterReelModels(NSArray *models, CFWhitelistManager *wl) {
     }
     return [f copy];
 }
-
-// ════════════════════════════════════════════════════════════════════════════
-// LAYER 2: UI層フック（Gonerino方式）
-// YTAsyncCollectionView.layoutSubviews で描画済みセルを後から削除する。
-// Model層をすり抜けた動画（検索・関連動画・キャッシュ・エンドカード）を全てカバー。
-// ════════════════════════════════════════════════════════════════════════════
-%hook YTAsyncCollectionView
-
-- (void)layoutSubviews {
-    %orig;
-    CFWhitelistManager *wl = [CFWhitelistManager sharedManager];
-    if ([wl isEmpty]) return;
-    id s = (id)self;
-    [s removeOffendingCells];
-}
-
-%new
-- (void)removeOffendingCells {
-    __weak id weakSelf = self;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        __strong id strongSelf = weakSelf;
-        if (!strongSelf) return;
-
-        CFWhitelistManager *wl = [CFWhitelistManager sharedManager];
-        if ([wl isEmpty]) return;
-
-        @try {
-            UICollectionView *cv = (UICollectionView *)strongSelf;
-            NSArray *visibleCells = [cv visibleCells];
-            NSMutableArray *toRemove = [NSMutableArray array];
-
-            for (UICollectionViewCell *cell in visibleCells) {
-                // _ASCollectionViewCell のみ処理
-                if (![NSStringFromClass([cell class])
-                      containsString:@"ASCollectionViewCell"]) continue;
-
-                SEL nodeSel = NSSelectorFromString(@"node");
-                if (![cell respondsToSelector:nodeSel]) continue;
-                #pragma clang diagnostic push
-                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                id node = [cell performSelector:nodeSel];
-                #pragma clang diagnostic pop
-                if (!node) continue;
-
-                // YTVideoWithContextNode 系のみフィルタ対象
-                if (!cf_nodeShouldBlock(node, wl)) continue;
-
-                NSIndexPath *ip = [cv indexPathForCell:cell];
-                if (ip) [toRemove addObject:ip];
-            }
-
-            if (toRemove.count > 0) {
-                CFLog(@"[UI-Layer] removing %lu cells", (unsigned long)toRemove.count);
-                [cv performBatchUpdates:^{
-                    [cv deleteItemsAtIndexPaths:toRemove];
-                } completion:nil];
-            }
-        } @catch (NSException *e) {
-            NSLog(@"[CF] UI-Layer exception: %@", e);
-        }
-    });
-}
-%end
 
 // ════════════════════════════════════════════════════════════════════════════
 // LAYER 1: Model層フック（既存ロジック）
@@ -904,279 +823,66 @@ didUpdateWithPrevItems:(NSArray *)prev
         [[NSUserDefaults standardUserDefaults] setBool:isSub forKey:@"cf_is_subscription_tab"];
     }
 }
-
-- (void)addSectionsFromArray:(NSArray *)array {
-    CFWhitelistManager *wl = [CFWhitelistManager sharedManager];
-
-    // ─── browseId をself→parentVCチェーンで直接確認（フラグ非依存）────────────
-    NSString *resolvedBrowseId = nil;
-    id s = (id)self;
-
-    // self自身のnavigationEndpointを最優先で確認
-    if ([s respondsToSelector:@selector(navigationEndpoint)]) {
-        #pragma clang diagnostic push
-        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-        id ep = [s performSelector:@selector(navigationEndpoint)];
-        #pragma clang diagnostic pop
-        if (ep && [ep respondsToSelector:@selector(browseEndpoint)]) {
-            #pragma clang diagnostic push
-            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-            id bep = [ep performSelector:@selector(browseEndpoint)];
-            #pragma clang diagnostic pop
-            if (bep && [bep respondsToSelector:@selector(browseId)]) {
-                #pragma clang diagnostic push
-                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                NSString *bid = [bep performSelector:@selector(browseId)];
-                #pragma clang diagnostic pop
-                if (bid.length) resolvedBrowseId = bid;
-            }
-        }
-    }
-
-    // 取得できなければparentVCチェーンを最大10段追う
-    if (!resolvedBrowseId) {
-        UIViewController *cur = (UIViewController *)s;
-        for (int d = 0; d < 10 && cur && !resolvedBrowseId; d++) {
-            cur = cur.parentViewController;
-            if (!cur) break;
-            id vc = cur;
-            if ([vc respondsToSelector:@selector(navigationEndpoint)]) {
-                #pragma clang diagnostic push
-                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                id ep = [vc performSelector:@selector(navigationEndpoint)];
-                #pragma clang diagnostic pop
-                if (ep && [ep respondsToSelector:@selector(browseEndpoint)]) {
-                    #pragma clang diagnostic push
-                    #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                    id bep = [ep performSelector:@selector(browseEndpoint)];
-                    #pragma clang diagnostic pop
-                    if (bep && [bep respondsToSelector:@selector(browseId)]) {
-                        #pragma clang diagnostic push
-                        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                        NSString *bid = [bep performSelector:@selector(browseId)];
-                        #pragma clang diagnostic pop
-                        if (bid.length) resolvedBrowseId = bid;
-                    }
-                }
-            }
-        }
-    }
-
-    BOOL isSubscriptionFeed;
-    if (resolvedBrowseId.length) {
-        isSubscriptionFeed = [resolvedBrowseId isEqualToString:@"FEsubscriptions"];
-        [[NSUserDefaults standardUserDefaults]
-            setBool:isSubscriptionFeed forKey:@"cf_is_subscription_tab"];
-        CFLog(@"[AppVC] browseId=%@ isSub=%d", resolvedBrowseId, (int)isSubscriptionFeed);
-    } else {
-        isSubscriptionFeed = [[NSUserDefaults standardUserDefaults]
-            boolForKey:@"cf_is_subscription_tab"];
-        CFLog(@"[AppVC] no browseId, fallback flag isSub=%d", (int)isSubscriptionFeed);
-    }
-
-    BOOL shouldFilter = !isSubscriptionFeed && ![wl isEmpty];
-    CFLog(@"[AppVC] count=%lu shouldFilter=%d wlEmpty=%d",
-          (unsigned long)array.count, (int)shouldFilter, (int)[wl isEmpty]);
-
-    // 最初の1回だけ構造をダンプ（フィルタリング中のみ）
-    if (!_cf_globalDumped && shouldFilter && array.count > 3) {
-        _cf_globalDumped = YES;
-        CFLog(@"[Dump] START count=%lu", (unsigned long)array.count);
-        for (NSUInteger di = 0; di < MIN(array.count, 5); di++) {
-            id sec = array[di];
-            CFLog(@"[Dump] si=%lu cls=%@", (unsigned long)di,
-                  NSStringFromClass([sec class]));
-        }
-        CFLog(@"[Dump] END");
-    }
-
-    if (!shouldFilter && !isSubscriptionFeed) { %orig; return; }
-
-    NSMutableArray *channelIdsForSync = isSubscriptionFeed
-        ? [NSMutableArray array] : nil;
-    NSMutableIndexSet *toRemoveSections = [NSMutableIndexSet indexSet];
-
-    for (NSUInteger si = 0; si < array.count; si++) {
-        id section = array[si];
-        NSString *secCls = NSStringFromClass([section class]);
-
-        if ([secCls containsString:@"FilterChip"] ||
-            [secCls containsString:@"ChipBar"]) continue;
-
-        // ShelfRenderer / Reel / Short 系はセクションごと除去
-        if (shouldFilter) {
-            if ([secCls isEqualToString:@"YTIShelfRenderer"] ||
-                [secCls containsString:@"ShelfRenderer"]     ||
-                [secCls containsString:@"Shelf"]             ||
-                [secCls containsString:@"Reel"]              ||
-                [secCls containsString:@"Short"]) {
-                CFLog(@"[AppVC] Shelf/Reel removed si=%lu cls=%@",
-                      (unsigned long)si, secCls);
-                [toRemoveSections addIndex:si];
-                continue;
-            }
-        }
-
-        if (![section respondsToSelector:@selector(contentsArray)]) continue;
-        #pragma clang diagnostic push
-        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-        NSArray *items = [section performSelector:@selector(contentsArray)];
-        #pragma clang diagnostic pop
-        if (!items.count) continue;
-
-        NSMutableIndexSet *toRemoveItems = [NSMutableIndexSet indexSet];
-        for (NSUInteger ii = 0; ii < items.count; ii++) {
-            id item = items[ii];
-            if (![item respondsToSelector:@selector(elementRenderer)]) continue;
-            #pragma clang diagnostic push
-            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-            id er = [item performSelector:@selector(elementRenderer)];
-            #pragma clang diagnostic pop
-            if (!er || ![er respondsToSelector:@selector(elementData)]) continue;
-            #pragma clang diagnostic push
-            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-            id ed = [er performSelector:@selector(elementData)];
-            #pragma clang diagnostic pop
-            if (!ed || ![ed isKindOfClass:[NSData class]]) continue;
-
-            NSString *channelId = cf_extractChannelId((NSData *)ed);
-            if (!channelId.length) {
-                if (shouldFilter) [toRemoveItems addIndex:ii];
-                continue;
-            }
-            if (isSubscriptionFeed) {
-                [channelIdsForSync addObject:channelId];
-            } else if (shouldFilter && ![wl isChannelAllowed:channelId]) {
-                CFLog(@"[AppVC] excluded ch=%@", channelId);
-                [toRemoveItems addIndex:ii];
-            }
-        }
-
-        if (toRemoveItems.count > 0) {
-            NSMutableArray *filtered = [items mutableCopy];
-            [filtered removeObjectsAtIndexes:toRemoveItems];
-            if ([section respondsToSelector:@selector(setContentsArray:)]) {
-                #pragma clang diagnostic push
-                #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-                [section performSelector:@selector(setContentsArray:)
-                             withObject:filtered];
-                #pragma clang diagnostic pop
-            }
-            if (filtered.count == 0) [toRemoveSections addIndex:si];
-        }
-    }
-
-    // 除去セクションのcontentsArrayをクリア（キャッシュ対策）
-    [toRemoveSections enumerateIndexesUsingBlock:^(NSUInteger idx, BOOL *stop) {
-        if (idx >= array.count) return;
-        id sec = array[idx];
-        if ([sec respondsToSelector:@selector(setContentsArray:)]) {
-            #pragma clang diagnostic push
-            #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-            [sec performSelector:@selector(setContentsArray:) withObject:@[]];
-            #pragma clang diagnostic pop
-        }
-    }];
-
-    NSMutableArray *filtered = [array mutableCopy];
-    if (toRemoveSections.count > 0) {
-        [filtered removeObjectsAtIndexes:toRemoveSections];
-        CFLog(@"[AppVC] ✅ removed=%lu remaining=%lu",
-              (unsigned long)toRemoveSections.count,
-              (unsigned long)filtered.count);
-    }
-    %orig(filtered);
-
-    if (isSubscriptionFeed && channelIdsForSync.count > 0) {
-        [wl syncSubscribedChannelIDs:channelIdsForSync];
-        CFLog(@"[Sync] ✅ %lu ids", (unsigned long)channelIdsForSync.count);
-    }
-}
 %end
 
-// ─── InnerTube VC フック（サブクラス補完 + 検索VC検出）──────────────────────
+// ─── フィードフィルター + ホワイトリスト同期 ─────────────────────────────────
+// YTAppCollectionViewController / YTWatchNextResultsViewController は
+// YTInnerTubeCollectionViewController のサブクラス。ここ1か所だけをフックする
+// （以前はサブクラスと二重にフックしており、登録チャンネルタブでも削除が走っていた）。
 %hook YTInnerTubeCollectionViewController
 - (void)addSectionsFromArray:(NSArray *)array {
-    id s = (id)self;
-    NSString *vcCls = NSStringFromClass([s class]);
-    CFWhitelistManager *wl = [CFWhitelistManager sharedManager];
-    BOOL isSub = [[NSUserDefaults standardUserDefaults] boolForKey:@"cf_is_subscription_tab"];
+    NSString *bid = nil;
+    CFFeedMode mode = cf_feedModeForVC((UIViewController *)(id)self, &bid);
+    if (mode == CFFeedModePassThrough) { %orig; return; }
+    NSString *tag = [NSString stringWithFormat:@"InnerTube %@ %@",
+                     NSStringFromClass([(id)self class]), bid ?: @"-"];
+    %orig(cf_processSections(array, mode, tag));
+}
 
-    // YTAppCollectionViewController以外のVCをログ
-    if (![vcCls isEqualToString:@"YTAppCollectionViewController"]) {
-        CFLog(@"[InnerTube] vcClass=%@ count=%lu isSub=%d",
-              vcCls, (unsigned long)array.count, (int)isSub);
-    }
-
-    // 検索VCまたはSearch含むVC → 強制フィルタリングON
-    BOOL forceFilter = [vcCls containsString:@"Search"] || [vcCls containsString:@"search"];
-    BOOL shouldFilter = (forceFilter || !isSub) && ![wl isEmpty];
-
-    if (!shouldFilter && !isSub) { %orig; return; }
-
-    NSMutableArray *channelIdsForSync = isSub ? [NSMutableArray array] : nil;
-    NSMutableIndexSet *toRemove = [NSMutableIndexSet indexSet];
-
-    for (NSUInteger si = 0; si < array.count; si++) {
-        id sec = array[si];
-        if (!cf_filterOneSectionInPlace(sec, wl)) {
-            [toRemove addIndex:si];
+// 初回表示・再読み込み経路（元リポジトリと同じく _sectionRenderers を処理）
+- (void)displaySectionsWithReloadingSectionControllerByRenderer:(id)renderer {
+    NSString *bid = nil;
+    CFFeedMode mode = cf_feedModeForVC((UIViewController *)(id)self, &bid);
+    if (mode != CFFeedModePassThrough) {
+        @try {
+            id cur = [(id)self valueForKey:@"_sectionRenderers"];
+            if ([cur isKindOfClass:[NSArray class]]) {
+                NSString *tag = [NSString stringWithFormat:@"Display %@ %@",
+                                 NSStringFromClass([(id)self class]), bid ?: @"-"];
+                NSArray *res = cf_processSections(cur, mode, tag);
+                if (res != cur) {
+                    [(id)self setValue:[res mutableCopy] forKey:@"_sectionRenderers"];
+                }
+            }
+        } @catch (NSException *e) {
+            CFLog(@"[Display] _sectionRenderers unavailable: %@", e.reason);
         }
     }
-
-    NSMutableArray *filtered = [array mutableCopy];
-    if (toRemove.count > 0) [filtered removeObjectsAtIndexes:toRemove];
-    %orig(filtered);
-
-    if (isSub && channelIdsForSync.count > 0) {
-        [wl syncSubscribedChannelIDs:channelIdsForSync];
-    }
+    %orig;
 }
 
 - (void)addSection:(id)section {
-    id s = (id)self;
-    NSString *vcCls = NSStringFromClass([s class]);
-    CFLog(@"[InnerTube-single] vcClass=%@", vcCls);
-    CFWhitelistManager *wl = [CFWhitelistManager sharedManager];
-    if ([wl isEmpty]) { %orig; return; }
-    BOOL isSub = [[NSUserDefaults standardUserDefaults] boolForKey:@"cf_is_subscription_tab"];
-    BOOL forceFilter = [vcCls containsString:@"Search"] || [vcCls containsString:@"search"];
-    if (!forceFilter && isSub) { %orig; return; }
-    if (cf_filterOneSectionInPlace(section, wl)) %orig;
+    if (!section) { %orig; return; }
+    CFFeedMode mode = cf_feedModeForVC((UIViewController *)(id)self, NULL);
+    if (mode == CFFeedModePassThrough) { %orig; return; }
+    NSArray *res = cf_processSections(@[section], mode, @"InnerTube-single");
+    if (res.count) %orig;
 }
 %end
 
 // ─── 検索VC フック ─────────────────────────────────────────────────────────
 %hook YTSearchResultsViewController
 - (void)addSectionsFromArray:(NSArray *)array {
-    id s = (id)self;
-    CFLog(@"[SearchVC] addSectionsFromArray vcClass=%@ count=%lu",
-          NSStringFromClass([s class]), (unsigned long)array.count);
-    CFWhitelistManager *wl = [CFWhitelistManager sharedManager];
-    if ([wl isEmpty]) { %orig; return; }
-    NSMutableArray *f = [NSMutableArray arrayWithCapacity:array.count];
-    for (id sec in array) {
-        if (cf_filterOneSectionInPlace(sec, wl)) [f addObject:sec];
-    }
-    CFLog(@"[SearchVC] %lu->%lu", (unsigned long)array.count, (unsigned long)f.count);
-    %orig(f);
+    if ([[CFWhitelistManager sharedManager] isEmpty]) { %orig; return; }
+    %orig(cf_processSections(array, CFFeedModeFilter, @"SearchVC"));
 }
 - (void)addSection:(id)section {
-    id s = (id)self;
-    CFLog(@"[SearchVC] addSection vcClass=%@", NSStringFromClass([s class]));
-    CFWhitelistManager *wl = [CFWhitelistManager sharedManager];
-    if ([wl isEmpty]) { %orig; return; }
-    if (cf_filterOneSectionInPlace(section, wl)) %orig;
+    if (!section || [[CFWhitelistManager sharedManager] isEmpty]) { %orig; return; }
+    if (cf_processSections(@[section], CFFeedModeFilter, @"SearchVC-single").count) %orig;
 }
 - (void)setSections:(NSArray *)sections {
-    CFLog(@"[SearchVC] setSections count=%lu", (unsigned long)sections.count);
-    CFWhitelistManager *wl = [CFWhitelistManager sharedManager];
-    if ([wl isEmpty]) { %orig; return; }
-    NSMutableArray *f = [NSMutableArray arrayWithCapacity:sections.count];
-    for (id sec in sections) {
-        if (cf_filterOneSectionInPlace(sec, wl)) [f addObject:sec];
-    }
-    %orig(f);
+    if ([[CFWhitelistManager sharedManager] isEmpty]) { %orig; return; }
+    %orig(cf_processSections(sections, CFFeedModeFilter, @"SearchVC-set"));
 }
 %end
 

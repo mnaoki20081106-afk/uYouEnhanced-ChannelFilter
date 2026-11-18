@@ -33,25 +33,30 @@ static NSString *const kWhitelistStorageKey = @"channelFilter_whitelistChannelID
 
 - (void)syncSubscribedChannelIDs:(NSArray<NSString *> *)channelIDs {
     if (!channelIDs || channelIDs.count == 0) return;
-    [self.channelIDSet removeAllObjects];
-    [self.channelIDSet addObjectsFromArray:channelIDs];
-    [[NSUserDefaults standardUserDefaults] setObject:channelIDs forKey:kWhitelistStorageKey];
-    [[NSUserDefaults standardUserDefaults] synchronize];
+    // 登録チャンネルフィードはページ単位（continuation）で届くため、
+    // 置き換えると直近ページのチャンネルだけが残ってしまう。追加マージにする。
+    @synchronized (self) {
+        NSUInteger before = self.channelIDSet.count;
+        [self.channelIDSet addObjectsFromArray:channelIDs];
+        if (self.channelIDSet.count == before) return;
+        [[NSUserDefaults standardUserDefaults] setObject:[self.channelIDSet allObjects]
+                                                  forKey:kWhitelistStorageKey];
+    }
     NSLog(@"[ChannelFilter] Whitelist synced: %lu channels", (unsigned long)self.channelIDSet.count);
 }
 
 - (BOOL)isChannelAllowed:(NSString *)channelID {
     if (!channelID || channelID.length == 0) return NO;
     NSString *normalized = [channelID stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-    return [self.channelIDSet containsObject:normalized];
+    @synchronized (self) { return [self.channelIDSet containsObject:normalized]; }
 }
 
 - (BOOL)isEmpty {
-    return self.channelIDSet.count == 0;
+    @synchronized (self) { return self.channelIDSet.count == 0; }
 }
 
 - (NSArray<NSString *> *)allowedChannelIDs {
-    return [self.channelIDSet allObjects];
+    @synchronized (self) { return [self.channelIDSet allObjects]; }
 }
 
 @end
